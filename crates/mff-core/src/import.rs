@@ -25,6 +25,8 @@ pub struct CsvImportOptions {
     pub batch_size: usize,
     /// Skip empty CSV fields (insert NULL) instead of empty strings.
     pub empty_as_null: bool,
+    /// Cell text that means SQL NULL (matches the exporter's default).
+    pub null_text: String,
 }
 
 impl Default for CsvImportOptions {
@@ -34,6 +36,7 @@ impl Default for CsvImportOptions {
             has_header: true,
             batch_size: 500,
             empty_as_null: true,
+            null_text: "NULL".to_string(),
         }
     }
 }
@@ -93,7 +96,7 @@ pub fn import_csv(
     let mut inserted = 0usize;
     let mut batch: Vec<String> = Vec::with_capacity(opts.batch_size);
     for record in &records {
-        let values = build_row_literals(&target, &mapping, record, opts.empty_as_null);
+        let values = build_row_literals(&target, &mapping, record, opts);
         batch.push(format!("({})", values.join(", ")));
         if batch.len() >= opts.batch_size {
             flush_batch(session, db, table, &used, &batch)?;
@@ -140,7 +143,7 @@ fn build_row_literals(
     target: &Table,
     mapping: &[Option<usize>],
     record: &[Option<String>],
-    empty_as_null: bool,
+    opts: &CsvImportOptions,
 ) -> Vec<String> {
     let mut out = Vec::with_capacity(mapping.len());
     for (file_idx, table_idx) in mapping.iter().enumerate() {
@@ -148,8 +151,14 @@ fn build_row_literals(
         match (table_idx, value) {
             (Some(ti), Some(v)) => {
                 let col = &target.columns[*ti];
-                if v.is_empty() {
-                    if empty_as_null && col.nullable {
+                if v == opts.null_text {
+                    // The exporter's NULL marker.
+                    out.push("NULL".into());
+                } else if is_binary_column(col) && is_hex_prefixed(&v) {
+                    // Round-trip of the exporter's `0x…` binary encoding.
+                    out.push(v);
+                } else if v.is_empty() {
+                    if opts.empty_as_null && col.nullable {
                         out.push("NULL".into());
                     } else {
                         out.push(sqlgen::value_text_to_sql(&col.column_type, ""));
@@ -163,6 +172,23 @@ fn build_row_literals(
         }
     }
     out
+}
+
+/// True for BLOB/BINARY columns (by declared type or missing charset).
+fn is_binary_column(col: &crate::model::Column) -> bool {
+    if col.charset.is_none() {
+        return sqlgen::type_class(&col.column_type) == sqlgen::TypeClass::Binary
+            || col.column_type.to_ascii_lowercase().contains("blob");
+    }
+    sqlgen::type_class(&col.column_type) == sqlgen::TypeClass::Binary
+}
+
+/// `0xABCD` / `0xabcd` shape check.
+fn is_hex_prefixed(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Read a CSV file; returns the header names (if present in the file) and
@@ -195,8 +221,11 @@ pub fn read_csv(file: &Path, delimiter: char) -> Result<(Vec<String>, Vec<Vec<Op
     Ok((headers, all))
 }
 
-/// Import a JSON file — an array of objects, or an object with a `rows`
-/// array (the shape produced by the matching exporter).
+/// Import a JSON file. Two shapes are accepted:
+///
+/// 1. an array of objects — `[{"id": 1, "name": "Ann"}, …]`
+/// 2. the grid shape produced by the matching exporter —
+///    `{"columns": ["id", "name"], "rows": [[1, "Ann"], …]}`
 pub fn import_json(
     session: &Session,
     db: &str,
@@ -208,11 +237,32 @@ pub fn import_json(
     let doc: Json = serde_json::from_str(&text)?;
     let rows: Vec<Json> = match doc {
         Json::Array(items) => items,
-        Json::Object(map) => match map.get("rows") {
-            Some(Json::Array(items)) => items.clone(),
+        Json::Object(map) => match (map.get("columns"), map.get("rows")) {
+            (Some(Json::Array(columns)), Some(Json::Array(items))) => {
+                // Grid shape: zip each row array with the column names to
+                // build one object per row.
+                let names: Vec<String> = columns
+                    .iter()
+                    .filter_map(|c| c.as_str().map(str::to_string))
+                    .collect();
+                items
+                    .iter()
+                    .filter_map(|row| match row {
+                        Json::Array(values) => {
+                            let obj: serde_json::Map<String, Json> = names
+                                .iter()
+                                .cloned()
+                                .zip(values.iter().cloned())
+                                .collect();
+                            Some(Json::Object(obj))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            }
             _ => {
                 return Err(MffError::Invalid(
-                    "JSON import expects an array of objects (or {\"rows\": […]})".into(),
+                    "JSON import expects an array of objects or {\"columns\": […], \"rows\": [[…]]}".into(),
                 ))
             }
         },
@@ -308,7 +358,13 @@ fn json_literal(col_type: &str, v: &Json) -> String {
         Json::Null => "NULL".to_string(),
         Json::Bool(b) => sqlgen::value_text_to_sql(col_type, if *b { "1" } else { "0" }),
         Json::Number(n) => n.to_string(),
-        Json::String(s) => sqlgen::value_text_to_sql(col_type, s),
+        Json::String(s) => {
+            if sqlgen::type_class(col_type) == sqlgen::TypeClass::Binary && is_hex_prefixed(s) {
+                s.clone() // exporter round-trip of binary data
+            } else {
+                sqlgen::value_text_to_sql(col_type, s)
+            }
+        }
         other => sqlgen::quote_string(&other.to_string()),
     }
 }
@@ -364,5 +420,62 @@ mod tests {
         let (headers, rows) = read_csv(&p, ';').unwrap();
         assert_eq!(headers, vec!["a", "b"]);
         assert_eq!(rows[0][1].as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn row_literals_handle_null_and_hex() {
+        let target = Table {
+            name: "t".into(),
+            columns: vec![
+                crate::model::Column {
+                    name: "bio".into(),
+                    column_type: "text".into(),
+                    nullable: true,
+                    ..Default::default()
+                },
+                crate::model::Column {
+                    name: "avatar".into(),
+                    column_type: "blob".into(),
+                    nullable: true,
+                    ..Default::default()
+                },
+                crate::model::Column {
+                    name: "email".into(),
+                    column_type: "varchar(10)".into(),
+                    nullable: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mapping = vec![Some(0), Some(1), Some(2)];
+        let opts = CsvImportOptions::default();
+        // NULL marker → SQL NULL; hex in binary column → raw hex;
+        // "NULL" in a *text* column is also the NULL marker.
+        let row = vec![
+            Some("NULL".to_string()),
+            Some("0xDEADBEEF".to_string()),
+            Some("NULL".to_string()),
+        ];
+        let out = build_row_literals(&target, &mapping, &row, &opts);
+        assert_eq!(out, vec!["NULL", "0xDEADBEEF", "NULL"]);
+        // A real hex-looking value in a *text* column stays a string.
+        let row2 = vec![
+            Some("0xDEAD".to_string()),
+            Some("NULL".to_string()),
+            Some("0xDEAD".to_string()),
+        ];
+        let out2 = build_row_literals(&target, &mapping, &row2, &opts);
+        assert_eq!(out2[0], "'0xDEAD'");
+        assert_eq!(out2[2], "'0xDEAD'");
+    }
+
+    #[test]
+    fn hex_prefixed_check() {
+        assert!(is_hex_prefixed("0xDEADBEEF"));
+        assert!(is_hex_prefixed("0x00FF"));
+        assert!(!is_hex_prefixed("0xGG"));
+        assert!(!is_hex_prefixed("NULL"));
+        assert!(!is_hex_prefixed("0x"));
     }
 }

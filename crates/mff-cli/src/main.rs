@@ -93,7 +93,7 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
         /// WHERE clause used with --table.
-        #[arg(long)]
+        #[arg(long, alias = "where")]
         where_clause: Option<String>,
         /// Row limit used with --table (0 = unlimited).
         #[arg(long, default_value_t = 0)]
@@ -206,7 +206,7 @@ impl From<FormatArg> for ExportFormat {
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
-        eprintln!("error: {e:#}");
+        eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
@@ -385,6 +385,12 @@ fn run(cli: Cli) -> Result<()> {
                     eprintln!("imported {n} row(s) in {:?}", started.elapsed());
                 }
                 "sql" => {
+                    // Select the target database before running the script
+                    // (script files usually contain unqualified names).
+                    session.run_statement(&format!(
+                        "USE {}",
+                        mff_core::sqlgen::quote_ident(&db)
+                    ))?;
                     let n = import_sql(&session, &file, continue_on_error)?;
                     eprintln!("executed {n} statement(s) in {:?}", started.elapsed());
                 }

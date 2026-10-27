@@ -112,6 +112,8 @@ pub fn export<W: Write>(
 
 /// CSV export: header row (optional) + data rows; quoting handled by the
 /// `csv` crate (RFC 4180 style, matching the original `CSVUtils.pas`).
+/// Binary cells are written as `0x…` hex strings so the round-trip is
+/// lossless (the matching importer recognises them).
 pub fn export_csv<W: Write>(grid: &Grid, opts: &ExportOptions, out: &mut W) -> Result<()> {
     let mut w = csv::WriterBuilder::new()
         .delimiter(opts.delimiter as u8)
@@ -123,11 +125,25 @@ pub fn export_csv<W: Write>(grid: &Grid, opts: &ExportOptions, out: &mut W) -> R
         w.write_record(&header)?;
     }
     for row in &grid.rows {
-        let record: Vec<String> = row.iter().map(|c| c.display(&opts.null_text)).collect();
+        let record: Vec<String> = row
+            .iter()
+            .map(|c| match c {
+                Cell::Bytes(b) => format!("0x{}", hex_encode(b)),
+                other => other.display(&opts.null_text),
+            })
+            .collect();
         w.write_record(&record)?;
     }
     w.flush()?;
     Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02X}"));
+    }
+    out
 }
 
 /// JSON export: `{"columns": […], "rows": [[…], …]}` with numbers kept as
@@ -140,7 +156,8 @@ pub fn export_json<W: Write>(grid: &Grid, out: &mut W) -> Result<()> {
         for (cell, col) in row.iter().zip(grid.columns.iter()) {
             vals.push(match cell {
                 Cell::Null => serde_json::Value::Null,
-                Cell::Bytes(b) => json!(String::from_utf8_lossy(b).into_owned()),
+                // Binary data: hex string so the round-trip is lossless.
+                Cell::Bytes(b) => json!(format!("0x{}", hex_encode(b))),
                 Cell::Text(s) => match crate::sqlgen::type_class(&col.type_str) {
                     crate::sqlgen::TypeClass::Numeric => {
                         if let Ok(i) = s.parse::<i128>() {
@@ -177,10 +194,14 @@ pub fn export_sql<W: Write>(
 
     if opts.include_create {
         if let Some(t) = table {
-            let ddl = t
+            let mut ddl = t
                 .create_statement
                 .clone()
                 .unwrap_or_else(|| sqlgen::create_table_sql(t));
+            // `SHOW CREATE TABLE` output has no trailing semicolon.
+            if !ddl.trim_end().ends_with(';') {
+                ddl.push(';');
+            }
             writeln!(out, "{ddl}\n")?;
         }
     }
@@ -254,13 +275,11 @@ pub fn export_xml<W: Write>(grid: &Grid, _opts: &ExportOptions, out: &mut W) -> 
             let name = escape_xml_attr(&col.name);
             match cell {
                 Cell::Null => write!(out, "    <column name=\"{name}\" null=\"true\"/>")?,
-                Cell::Bytes(b) => {
-                    write!(
-                        out,
-                        "    <column name=\"{name}\">{}</column>",
-                        escape_xml_text(&String::from_utf8_lossy(b))
-                    )?
-                }
+                Cell::Bytes(b) => write!(
+                    out,
+                    "    <column name=\"{name}\">0x{}</column>",
+                    hex_encode(b)
+                )?,
                 Cell::Text(s) => write!(
                     out,
                     "    <column name=\"{name}\">{}</column>",
@@ -375,6 +394,37 @@ mod tests {
         let s = export_to_string(&sample_grid(), None, &ExportOptions { format: ExportFormat::Xml, ..Default::default() }).unwrap();
         assert!(s.contains("<column name=\"name\">Ann</column>"));
         assert!(s.contains("<column name=\"name\" null=\"true\"/>"));
+    }
+
+    #[test]
+    fn csv_binary_cells_use_hex() {
+        let g = Grid {
+            columns: vec![ColMeta::new("data", "BLOB")],
+            rows: vec![vec![Cell::Bytes(vec![0xDE, 0xAD])]],
+        };
+        let s = export_to_string(&g, None, &ExportOptions::default()).unwrap();
+        assert!(s.contains("0xDEAD"));
+        assert!(!s.contains("["));
+    }
+
+    #[test]
+    fn sql_export_ddl_gets_semicolon() {
+        let t = crate::model::Table {
+            name: "t".into(),
+            create_statement: Some("CREATE TABLE `t` (`id` int)".into()),
+            ..Default::default()
+        };
+        let g = Grid {
+            columns: vec![ColMeta::new("id", "LONG")],
+            rows: vec![vec![Cell::Text("1".into())]],
+        };
+        let opts = ExportOptions {
+            format: ExportFormat::Sql,
+            ..Default::default()
+        };
+        let s = export_to_string(&g, Some(&t), &opts).unwrap();
+        assert!(s.contains("CREATE TABLE `t` (`id` int);"));
+        assert!(s.contains("INSERT INTO `t`"));
     }
 
     #[test]

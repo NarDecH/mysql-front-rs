@@ -595,6 +595,50 @@ impl Session {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mysql::consts::ColumnType;
+
+    #[test]
+    fn text_columns_are_not_binary() {
+        // A TEXT column carries a real character set (utf8mb4 = 45).
+        let text_col = mysql::Column::new(ColumnType::MYSQL_TYPE_BLOB)
+            .with_name(b"bio")
+            .with_character_set(45);
+        assert_eq!(col_meta_from_column(&text_col).type_str, "TEXT");
+
+        // A true BLOB uses the binary charset id 63.
+        let blob_col = mysql::Column::new(ColumnType::MYSQL_TYPE_BLOB)
+            .with_name(b"avatar")
+            .with_character_set(63);
+        assert_eq!(col_meta_from_column(&blob_col).type_str, "BLOB");
+
+        let varchar = mysql::Column::new(ColumnType::MYSQL_TYPE_VAR_STRING)
+            .with_name(b"name")
+            .with_character_set(45);
+        assert_eq!(col_meta_from_column(&varchar).type_str, "VARCHAR");
+    }
+
+    #[test]
+    fn value_display_formats_dates_and_times() {
+        assert_eq!(
+            value_display(&Value::Date(2024, 1, 15, 9, 30, 5, 0)),
+            "2024-01-15 09:30:05"
+        );
+        assert_eq!(
+            value_display(&Value::Date(2024, 1, 15, 9, 30, 5, 123000)),
+            "2024-01-15 09:30:05.123000"
+        );
+        assert_eq!(
+            value_display(&Value::Time(false, 1, 2, 3, 4, 0)),
+            "26:03:04" // 1 day + 2 hours
+        );
+        assert_eq!(value_display(&Value::Time(true, 0, 1, 0, 0, 0)), "-01:00:00");
+        assert_eq!(value_display(&Value::NULL), "NULL");
+    }
+}
+
 fn ssl_opts(m: crate::account::SslMode) -> Option<mysql::SslOpts> {
     use mysql::SslOpts;
     match m {
@@ -637,7 +681,7 @@ fn collect_current_set(
         .columns()
         .as_ref()
         .iter()
-        .map(|c| ColMeta::new(c.name_str().to_string(), column_type_str(c.column_type())))
+        .map(col_meta_from_column)
         .collect();
 
     let mut rows: Vec<Vec<Cell>> = Vec::new();
@@ -689,6 +733,23 @@ fn column_type_str(t: mysql::consts::ColumnType) -> &'static str {
         MYSQL_TYPE_TYPED_ARRAY => "ARRAY",
         MYSQL_TYPE_UNKNOWN => "UNKNOWN",
     }
+}
+
+/// Build the grid metadata for one result column. The protocol reports
+/// `TEXT` columns under the BLOB family too — they carry a character set
+/// (binary columns use charset id 63), so use that to name them `*TEXT`.
+fn col_meta_from_column(c: &mysql::Column) -> ColMeta {
+    let mut type_str = column_type_str(c.column_type());
+    if c.character_set() != 63 {
+        type_str = match type_str {
+            "TINYBLOB" => "TINYTEXT",
+            "MEDIUMBLOB" => "MEDIUMTEXT",
+            "LONGBLOB" => "LONGTEXT",
+            "BLOB" => "TEXT",
+            other => other,
+        };
+    }
+    ColMeta::new(c.name_str().to_string(), type_str)
 }
 
 /// Human-readable rendering of a `mysql::Value` (the crate no longer
