@@ -1,0 +1,303 @@
+//! Application shell: state, the connections screen, the top bar, job
+//! polling and modal routing.
+
+use std::collections::HashMap;
+
+use egui::Context;
+use mff_core::Registry;
+
+use crate::dialogs::{ConnEditor, ExportDlg};
+use crate::jobs::{Jobs, UiMsg};
+use crate::session_view::SessionState;
+
+pub struct App {
+    pub registry: Registry,
+    pub sessions: HashMap<String, SessionState>,
+    pub active_conn: Option<String>,
+    pub jobs: Jobs,
+    pub status: String,
+    pub conn_edit: Option<ConnEditor>,
+    pub export_dlg: Option<ExportDlg>,
+    pub confirm_delete: Option<String>,
+    pub connect_error: Option<String>,
+    pub font_note: Option<String>,
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let font_note = crate::fonts::install_fonts(&cc.egui_ctx)
+            .map(|n| format!("Thai font loaded: {n}"));
+        Self {
+            registry: Registry::load_default(),
+            sessions: HashMap::new(),
+            active_conn: None,
+            jobs: Jobs::new(),
+            status: if font_note.is_some() {
+                "ready".into()
+            } else {
+                "ready (no Thai-capable system font found — Thai text may show boxes)".into()
+            },
+            conn_edit: None,
+            export_dlg: None,
+            confirm_delete: None,
+            connect_error: None,
+            font_note,
+        }
+    }
+
+    /// Drain worker messages and route them into the session states.
+    fn poll_jobs(&mut self) {
+        for msg in self.jobs.drain() {
+            if let UiMsg::Status(s) = &msg {
+                if s.starts_with('✓') || s.starts_with('✗') {
+                    if let Some(editor) = self.conn_edit.as_mut() {
+                        if editor.testing {
+                            editor.testing = false;
+                            if s.starts_with('✗') {
+                                editor.error = Some(s.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            self.apply_msg(msg);
+        }
+    }
+
+    /// The connections home screen.
+    fn show_connections_screen(&mut self, ctx: &Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.heading("mysql-front-rs");
+                ui.weak(format!("v{}", mff_core::VERSION));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(12.0);
+                    if ui.button("＋ New connection").clicked() {
+                        self.open_conn_editor(None);
+                    }
+                });
+            });
+            ui.separator();
+            ui.add_space(8.0);
+
+            if let Some(err) = &self.connect_error {
+                ui.colored_label(egui::Color32::LIGHT_RED, format!("⚠ {err}"));
+                ui.add_space(4.0);
+            }
+
+            let conns = self.registry.sorted();
+            if conns.is_empty() {
+                ui.add_space(40.0);
+                ui.vertical_centered(|ui| {
+                    ui.label("no saved connections yet");
+                    ui.add_space(8.0);
+                    if ui.button("＋ Create your first connection").clicked() {
+                        self.open_conn_editor(None);
+                    }
+                });
+            } else {
+                use egui_extras::{Column, TableBuilder};
+                // Local clones of ids/actions to satisfy the borrow checker
+                // inside the table body closure.
+                let mut connect_id: Option<String> = None;
+                let mut edit_id: Option<String> = None;
+                let mut dup_id: Option<String> = None;
+                let mut del_id: Option<String> = None;
+
+                let rows: Vec<mff_core::Connection> =
+                    conns.into_iter().cloned().collect();
+                TableBuilder::new(ui)
+                    .striped(true)
+                    .resizable(true)
+                    .columns(Column::initial(220.0).resizable(true), 1)
+                    .columns(Column::initial(200.0).resizable(true), 1)
+                    .columns(Column::initial(140.0).resizable(true), 1)
+                    .columns(Column::initial(140.0).resizable(true), 1)
+                    .columns(Column::initial(90.0).resizable(true), 1)
+                    .columns(Column::auto(), 1)
+                    .header(22.0, |mut h| {
+                        for t in ["Name", "Host:port", "User", "Database", "SSL", ""] {
+                            h.col(|ui| {
+                                ui.strong(t);
+                            });
+                        }
+                    })
+                    .body(|body| {
+                        body.rows(24.0, rows.len(), |mut row| {
+                            let c = &rows[row.index()];
+                            row.col(|ui| {
+                                ui.strong(&c.name);
+                            });
+                                row.col(|ui| {
+                                    ui.label(c.host_port());
+                                });
+                                row.col(|ui| {
+                                    ui.label(&c.user);
+                                });
+                                row.col(|ui| {
+                                    ui.label(c.database.as_deref().unwrap_or("—"));
+                                });
+                                row.col(|ui| {
+                                    ui.label(match c.ssl_mode {
+                                        mff_core::SslMode::Disabled => "—",
+                                        _ => "TLS",
+                                    });
+                                });
+                                row.col(|ui| {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Connect").clicked() {
+                                            connect_id = Some(c.id.clone());
+                                        }
+                                        if ui.small_button("Edit").clicked() {
+                                            edit_id = Some(c.id.clone());
+                                        }
+                                        if ui.small_button("Duplicate").clicked() {
+                                            dup_id = Some(c.id.clone());
+                                        }
+                                        if ui.small_button("Delete").clicked() {
+                                            del_id = Some(c.id.clone());
+                                        }
+                                    });
+                                });
+                        });
+                    });
+
+                if let Some(id) = connect_id {
+                    if let Some(c) = self.registry.get(&id).cloned() {
+                        self.connect_error = None;
+                        self.connect(c);
+                    }
+                }
+                if let Some(id) = edit_id {
+                    if let Some(c) = self.registry.get(&id).cloned() {
+                        self.open_conn_editor(Some(&c));
+                    }
+                }
+                if let Some(id) = dup_id {
+                    if let Some(c) = self.registry.get(&id).cloned() {
+                        let mut d = c.clone();
+                        d.id = mff_core::Connection::new_id();
+                        d.name = format!("{} (copy)", d.name);
+                        self.open_conn_editor(Some(&d));
+                        if let Some(editor) = self.conn_edit.as_mut() {
+                            editor.editing_id = None; // save as a new entry
+                        }
+                    }
+                }
+                if let Some(id) = del_id {
+                    self.confirm_delete = Some(id);
+                }
+            }
+
+            // Status bar at the bottom of the panel.
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.small(&self.status);
+                    if let Some(note) = &self.font_note {
+                        ui.small(format!("· {note}"));
+                    }
+                });
+            });
+        });
+
+        // Delete confirmation.
+        if let Some(id) = self.confirm_delete.clone() {
+            let name = self
+                .registry
+                .get(&id)
+                .map(|c| c.name.clone())
+                .unwrap_or_default();
+            let mut open = true;
+            let mut confirmed = false;
+            egui::Window::new("Delete connection")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("Delete connection “{name}”?"));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(egui::RichText::new("Delete").color(egui::Color32::LIGHT_RED)).clicked() {
+                            confirmed = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_delete = None;
+                        }
+                    });
+                });
+            if !open {
+                self.confirm_delete = None;
+            }
+            if confirmed {
+                self.registry.remove(&id);
+                let _ = self.registry.save_default();
+                self.confirm_delete = None;
+                self.status = format!("connection “{name}” deleted");
+            }
+        }
+    }
+
+    /// Top bar of the session workspace (copy cell + back home).
+    fn show_session_top(&mut self, ctx: &Context, _conn_id: &str) {
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.small_button("⌂ Connections").clicked() {
+                    self.active_conn = None;
+                }
+                ui.separator();
+                // Copy button + Ctrl+C inside the data view.
+                if ui
+                    .small_button("⧉ Copy cell")
+                    .on_hover_text("Copy the selected cell (Ctrl+C)")
+                    .clicked()
+                {
+                    self.copy_selected_cell(ctx);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.small(&self.status);
+                });
+            });
+        });
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.poll_jobs();
+
+        // Ctrl+C copies the selected data cell.
+        if ctx.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.ctrl) {
+            if self.active_conn.is_some() {
+                self.copy_selected_cell(ctx);
+            }
+        }
+
+        if self.active_conn.is_none() {
+            self.show_connections_screen(ctx);
+        } else {
+            let conn_id = self.active_conn.clone().unwrap();
+            if !self.sessions.contains_key(&conn_id) {
+                self.active_conn = None;
+                return;
+            }
+            self.show_session_top(ctx, &conn_id);
+            self.show_session(ctx, conn_id);
+        }
+
+        // Connection editor modal (works on both screens).
+        if self.conn_edit.is_some() {
+            self.show_conn_editor(ctx);
+        }
+
+        // Keep repainting while jobs are in flight so spinners move and
+        // results appear promptly.
+        let busy = self.sessions.values().map(|s| s.busy).sum::<usize>()
+            + usize::from(self.conn_edit.as_ref().map(|e| e.testing).unwrap_or(false));
+        if busy > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+}

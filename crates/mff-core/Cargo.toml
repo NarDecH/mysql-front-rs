@@ -1,0 +1,19 @@
+[package]
+name = "mff-core"
+description = "Core library for MySQL-Front-rs: sessions, schema model, SQL generation, import/export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mysql = { version = "26", features = ["native-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
+thiserror = "2"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"

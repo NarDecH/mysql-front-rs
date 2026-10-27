@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mff-core",
+    "crates/mff-cli",
+    "crates/mff-gui",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0-or-later"
+authors = ["NarDecH"]
+repository = "https://github.com/NarDecH/mysql-front-rs"
+description = "MySQL-Front rewritten in Rust — a fast, cross-platform MySQL GUI client"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

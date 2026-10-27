@@ -1,0 +1,23 @@
+[package]
+name = "mff-gui"
+description = "MySQL-Front rewritten in Rust — desktop GUI client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mysql-front-rs"
+path = "src/main.rs"
+
+[dependencies]
+mff-core = { path = "../mff-core" }
+eframe = "0.33"
+egui = "0.33"
+egui_extras = "0.33"
+rfd = "0.15"
+dirs = "6"
+
+[package.metadata.notes]
+gui = "egui-based desktop client"
