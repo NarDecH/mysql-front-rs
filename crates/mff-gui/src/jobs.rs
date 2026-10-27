@@ -54,6 +54,13 @@ pub enum UiMsg {
         conn_id: String,
         result: std::result::Result<Vec<(String, String)>, String>,
     },
+    Renamed {
+        conn_id: String,
+        is_view: bool,
+        old: String,
+        new: String,
+        result: std::result::Result<(), String>,
+    },
     Status(String),
 }
 

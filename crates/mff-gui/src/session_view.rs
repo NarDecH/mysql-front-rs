@@ -28,6 +28,10 @@ pub struct SessionState {
     pub tree_filter: String,
     pub busy: usize,
     pub error: Option<String>,
+    /// Explorer-style tree selection: (is_view, name).
+    pub tree_selected: Option<(bool, String)>,
+    /// Active inline rename, if any.
+    pub tree_rename: Option<TreeRename>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +122,17 @@ pub struct InfoState {
     pub loading: bool,
 }
 
+/// Inline rename state for one tree entry (Explorer-style).
+#[derive(Debug, Clone)]
+pub struct TreeRename {
+    pub is_view: bool,
+    pub old: String,
+    pub value: String,
+    /// Request focus on the edit for the frame(s) after entering rename mode.
+    pub just_started: bool,
+    pub error: Option<String>,
+}
+
 impl SessionState {
     pub fn new(
         session: Session,
@@ -142,6 +157,8 @@ impl SessionState {
             tree_filter: String::new(),
             busy: 0,
             error: None,
+            tree_selected: None,
+            tree_rename: None,
         }
     }
 }
@@ -374,7 +391,10 @@ impl App {
                                     .find(|d| {
                                         !matches!(
                                             d.to_lowercase().as_str(),
-                                            "information_schema" | "mysql" | "performance_schema" | "sys"
+                                            "information_schema"
+                                                | "mysql"
+                                                | "performance_schema"
+                                                | "sys"
                                         )
                                     })
                                     .cloned()
@@ -393,6 +413,10 @@ impl App {
                 if let Some(state) = self.sessions.get_mut(&conn_id) {
                     state.busy = state.busy.saturating_sub(1);
                     state.objects_loading = false;
+                    // A fresh object list invalidates any pending selection or
+                    // inline rename.
+                    state.tree_selected = None;
+                    state.tree_rename = None;
                     if state.current_db == db {
                         match result {
                             Ok(objects) => state.objects = Some(objects),
@@ -461,6 +485,62 @@ impl App {
                     }
                 }
             }
+            UiMsg::Renamed {
+                conn_id,
+                is_view: _,
+                old,
+                new,
+                result,
+            } => {
+                let mut reload: Option<(String, String, Option<(String, bool)>)> = None;
+                let mut status = String::new();
+                let mut success = false;
+                {
+                    let Some(state) = self.sessions.get_mut(&conn_id) else {
+                        return;
+                    };
+                    state.busy = state.busy.saturating_sub(1);
+                    match result {
+                        Ok(()) => {
+                            success = true;
+                            state.tree_rename = None;
+                            // Follow the renamed object if it is open somewhere.
+                            if state.data.table == old {
+                                state.data.table = new.clone();
+                                if state.view == ActiveView::Data {
+                                    let filter = state.data.filter_applied.clone();
+                                    let sort = state.data.sort.clone();
+                                    reload = Some((new.clone(), filter, sort));
+                                }
+                            }
+                            if state.structure.table == old {
+                                state.structure.table = new.clone();
+                                state.structure.schema = None;
+                            }
+                            status = format!("renamed {old} -> {new}");
+                        }
+                        Err(e) => {
+                            // Keep the inline editor open so the name can be fixed.
+                            if let Some(r) = state.tree_rename.as_mut() {
+                                r.error = Some(e.clone());
+                                r.just_started = false;
+                            }
+                            status = format!("rename failed: {e}");
+                        }
+                    }
+                }
+                self.status = status;
+                if let Some((table, filter, sort)) = reload {
+                    reopen_data(self, &conn_id, table, filter, sort);
+                } else if success {
+                    let db = self
+                        .sessions
+                        .get(&conn_id)
+                        .map(|s| s.current_db.clone())
+                        .unwrap_or_default();
+                    self.load_objects(&conn_id, db);
+                }
+            }
         }
     }
 
@@ -525,9 +605,16 @@ impl App {
         });
 
         // ── Left: object browser ───────────────────────────────────────
-        // The tree renders from a snapshot of the object lists; clicks are
-        // collected and executed afterwards (borrow checker friendly).
-        let mut open_table: Option<String> = None;
+        // The tree renders from a snapshot of the object lists; interactions
+        // are collected and executed afterwards (borrow checker friendly).
+        //
+        // Explorer-like behaviour:
+        //   * single click                       → select
+        //   * double click                       → open the data view
+        //   * click the selected item / F2 / context menu → inline rename
+        //   * Enter or click elsewhere           → commit (RENAME TABLE)
+        //   * Esc                                → cancel
+        let mut actions: Vec<TreeAction> = Vec::new();
         let mut open_structure_table: Option<String> = None;
         let mut export_table: Option<String> = None;
 
@@ -537,7 +624,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.heading("Objects");
                 ui.add_space(4.0);
-                let (objects, objects_loading) = {
+                let (objects, objects_loading, tree_selected, tree_rename) = {
                     let Some(state) = self.sessions.get_mut(&conn_id) else {
                         return;
                     };
@@ -553,7 +640,12 @@ impl App {
                             ui.small("loading…");
                         });
                     }
-                    (state.objects.clone(), state.objects_loading)
+                    (
+                        state.objects.clone(),
+                        state.objects_loading,
+                        state.tree_selected.clone(),
+                        state.tree_rename.clone(),
+                    )
                 };
 
                 let Some(objects) = objects else {
@@ -567,7 +659,8 @@ impl App {
                     .get(&conn_id)
                     .map(|s| s.tree_filter.to_lowercase())
                     .unwrap_or_default();
-                // The table currently being browsed gets highlighted.
+                // The table currently being browsed is highlighted until the
+                // user makes an explicit tree selection.
                 let browsed = self
                     .sessions
                     .get(&conn_id)
@@ -575,6 +668,27 @@ impl App {
                     .unwrap_or_default();
                 let matches =
                     |name: &str| filter.is_empty() || name.to_lowercase().contains(&filter);
+                let is_sel = |is_view: bool, name: &str| -> bool {
+                    match tree_selected.as_ref() {
+                        Some((v, n)) => *v == is_view && n == name,
+                        None => browsed == name,
+                    }
+                };
+                let renaming = |is_view: bool, name: &str| -> bool {
+                    tree_rename
+                        .as_ref()
+                        .map(|r| r.is_view == is_view && r.old == name)
+                        .unwrap_or(false)
+                };
+
+                // F2 renames the selected entry.
+                if tree_rename.is_none() {
+                    if let Some((is_view, name)) = &tree_selected {
+                        if ui.input(|i| i.key_pressed(egui::Key::F2)) {
+                            actions.push(TreeAction::StartRename(*is_view, name.clone()));
+                        }
+                    }
+                }
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.collapsing(format!("Tables ({})", objects.tables.len()), |ui| {
@@ -582,23 +696,42 @@ impl App {
                             if !matches(&t.name) {
                                 continue;
                             }
+                            if renaming(false, &t.name) {
+                                render_rename_edit(
+                                    ui,
+                                    tree_rename.as_ref().unwrap(),
+                                    false,
+                                    &mut actions,
+                                );
+                                continue;
+                            }
                             let resp = crate::theme::icon_label_sel(
                                 ui,
                                 &crate::theme::table_icon(),
                                 &t.name,
-                                browsed == t.name,
+                                is_sel(false, &t.name),
                             );
-                            if resp.clicked() {
-                                open_table = Some(t.name.clone());
+                            if resp.double_clicked() {
+                                actions.push(TreeAction::Open(false, t.name.clone()));
+                            } else if resp.clicked() {
+                                if is_sel(false, &t.name) {
+                                    actions.push(TreeAction::StartRename(false, t.name.clone()));
+                                } else {
+                                    actions.push(TreeAction::Select(false, t.name.clone()));
+                                }
                             }
                             resp.context_menu(|ui| {
                                 if ui.button("Show data").clicked() {
                                     ui.close();
-                                    open_table = Some(t.name.clone());
+                                    actions.push(TreeAction::Open(false, t.name.clone()));
                                 }
                                 if ui.button("Show structure").clicked() {
                                     ui.close();
                                     open_structure_table = Some(t.name.clone());
+                                }
+                                if ui.button("Rename").clicked() {
+                                    ui.close();
+                                    actions.push(TreeAction::StartRename(false, t.name.clone()));
                                 }
                                 if ui.button("Export…").clicked() {
                                     ui.close();
@@ -612,14 +745,29 @@ impl App {
                             if !matches(&v.name) {
                                 continue;
                             }
+                            if renaming(true, &v.name) {
+                                render_rename_edit(
+                                    ui,
+                                    tree_rename.as_ref().unwrap(),
+                                    true,
+                                    &mut actions,
+                                );
+                                continue;
+                            }
                             let resp = crate::theme::icon_label_sel(
                                 ui,
                                 &crate::theme::view_icon(),
                                 &v.name,
-                                browsed == v.name,
+                                is_sel(true, &v.name),
                             );
-                            if resp.clicked() {
-                                open_table = Some(v.name.clone());
+                            if resp.double_clicked() {
+                                actions.push(TreeAction::Open(true, v.name.clone()));
+                            } else if resp.clicked() {
+                                if is_sel(true, &v.name) {
+                                    actions.push(TreeAction::StartRename(true, v.name.clone()));
+                                } else {
+                                    actions.push(TreeAction::Select(true, v.name.clone()));
+                                }
                             }
                         }
                     });
@@ -663,11 +811,60 @@ impl App {
             });
 
         // Deferred tree actions.
+        for action in actions {
+            match action {
+                TreeAction::Select(is_view, name) => {
+                    if let Some(state) = self.sessions.get_mut(&conn_id) {
+                        state.tree_selected = Some((is_view, name));
+                    }
+                }
+                TreeAction::Open(is_view, name) => {
+                    if let Some(state) = self.sessions.get_mut(&conn_id) {
+                        state.tree_selected = Some((is_view, name.clone()));
+                    }
+                    open_data(self, &conn_id, name);
+                }
+                TreeAction::StartRename(is_view, name) => {
+                    if let Some(state) = self.sessions.get_mut(&conn_id) {
+                        if state.tree_rename.is_none() {
+                            state.tree_selected = Some((is_view, name.clone()));
+                            state.tree_rename = Some(TreeRename {
+                                is_view,
+                                old: name.clone(),
+                                value: name,
+                                just_started: true,
+                                error: None,
+                            });
+                        }
+                    }
+                }
+                TreeAction::RenameCancel => {
+                    if let Some(state) = self.sessions.get_mut(&conn_id) {
+                        state.tree_rename = None;
+                    }
+                }
+                TreeAction::RenameValue(value) => {
+                    if let Some(state) = self.sessions.get_mut(&conn_id) {
+                        if let Some(r) = state.tree_rename.as_mut() {
+                            r.value = value;
+                        }
+                    }
+                }
+                TreeAction::RenameFocusTaken => {
+                    if let Some(state) = self.sessions.get_mut(&conn_id) {
+                        if let Some(r) = state.tree_rename.as_mut() {
+                            r.just_started = false;
+                        }
+                    }
+                }
+                TreeAction::RenameCommit(is_view, old, new) => {
+                    commit_rename(self, &conn_id, is_view, old, new);
+                }
+            }
+        }
+
         if let Some(t) = open_structure_table {
             open_structure(self, &conn_id, t);
-        }
-        if let Some(t) = open_table {
-            open_data(self, &conn_id, t);
         }
         if let Some(t) = export_table {
             open_data(self, &conn_id, t.clone());
@@ -786,4 +983,92 @@ pub fn open_structure(app: &mut App, conn_id: &str, table: String) {
         state.view = ActiveView::Structure;
     }
     app.load_schema(conn_id, table);
+}
+
+/// Deferred interactions collected while rendering the object browser.
+enum TreeAction {
+    Select(bool, String),
+    Open(bool, String),
+    StartRename(bool, String),
+    RenameValue(String),
+    RenameCommit(bool, String, String),
+    RenameCancel,
+    RenameFocusTaken,
+}
+
+/// Inline rename editor for one tree entry (Explorer-style). Emits
+/// commit/cancel actions; the edit keeps focus until Enter, Escape or a
+/// click elsewhere.
+fn render_rename_edit(
+    ui: &mut egui::Ui,
+    rename: &TreeRename,
+    is_view: bool,
+    actions: &mut Vec<TreeAction>,
+) {
+    let mut value = rename.value.clone();
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut value)
+            .desired_width(ui.available_width().min(220.0)),
+    );
+    // Sync the typed text back, otherwise the edit is reset from the stale
+    // state snapshot on the next frame and keystrokes are lost.
+    if value != rename.value {
+        actions.push(TreeAction::RenameValue(value.clone()));
+    }
+    if rename.just_started {
+        resp.request_focus();
+        actions.push(TreeAction::RenameFocusTaken);
+    }
+    if let Some(err) = &rename.error {
+        ui.colored_label(egui::Color32::LIGHT_RED, format!("⚠ {err}"));
+    }
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        actions.push(TreeAction::RenameCancel);
+    } else if resp.lost_focus() {
+        // Enter blurs a single-line TextEdit, so a blur is either Enter or a
+        // click elsewhere — both commit the rename (Explorer behaviour).
+        actions.push(TreeAction::RenameCommit(is_view, rename.old.clone(), value));
+    }
+}
+
+/// Validate and run `RENAME TABLE` for an inline rename.
+fn commit_rename(app: &mut App, conn_id: &str, is_view: bool, old: String, new: String) {
+    let new = new.trim().to_string();
+    let Some(state) = app.sessions.get_mut(conn_id) else {
+        return;
+    };
+    if new.is_empty() || new == old {
+        state.tree_rename = None; // unchanged or empty → just leave rename mode
+        return;
+    }
+    if new.contains('`') {
+        if let Some(r) = state.tree_rename.as_mut() {
+            r.error = Some("name must not contain a backtick".into());
+            r.just_started = false;
+        }
+        return;
+    }
+    let session = state.session.clone();
+    let db = state.current_db.clone();
+    let tx = app.jobs.sender();
+    let id = conn_id.to_string();
+    state.busy += 1;
+    std::thread::spawn(move || {
+        let sql = format!(
+            "RENAME TABLE {} TO {}",
+            mff_core::sqlgen::quote_qualified(&[&db, &old]),
+            mff_core::sqlgen::quote_qualified(&[&db, &new])
+        );
+        let result = session
+            .run_statement(&sql)
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        let _ = tx.send(UiMsg::Renamed {
+            conn_id: id,
+            is_view,
+            old,
+            new,
+            result,
+        });
+    });
 }
