@@ -300,7 +300,7 @@ pub fn create_table_sql(t: &Table) -> String {
 /// Render a default value. `information_schema` (MySQL 8) already returns
 /// string defaults quoted; older servers / the mysql crate report them
 /// unquoted — handle both.
-fn default_literal(col_type: &str, d: &str) -> String {
+pub fn default_literal(col_type: &str, d: &str) -> String {
     if d.eq_ignore_ascii_case("null") {
         return "NULL".to_string();
     }

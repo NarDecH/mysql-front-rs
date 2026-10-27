@@ -11,6 +11,7 @@ mod dialogs;
 mod fonts;
 mod info_view;
 mod jobs;
+mod new_dialog;
 mod query_view;
 mod session_view;
 mod structure_view;

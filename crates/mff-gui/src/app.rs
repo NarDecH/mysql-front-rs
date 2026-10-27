@@ -22,6 +22,7 @@ pub struct App {
     pub connect_error: Option<String>,
     pub font_note: Option<String>,
     pub theme: egui::Theme,
+    pub new_dlg: Option<crate::new_dialog::NewDialog>,
 }
 
 impl App {
@@ -44,6 +45,7 @@ impl App {
             connect_error: None,
             font_note,
             theme: egui::Theme::Light,
+            new_dlg: None,
         }
     }
 
@@ -318,6 +320,17 @@ impl eframe::App for App {
         // Connection editor modal (works on both screens).
         if self.conn_edit.is_some() {
             self.show_conn_editor(ctx);
+        }
+
+        // "New object" modal (needs the session it belongs to).
+        if self.new_dlg.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_new_dialog(ctx, &id);
+                } else {
+                    self.new_dlg = None;
+                }
+            }
         }
 
         // Keep repainting while jobs are in flight so spinners move and

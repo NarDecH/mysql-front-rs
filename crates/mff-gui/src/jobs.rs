@@ -61,6 +61,11 @@ pub enum UiMsg {
         new: String,
         result: std::result::Result<(), String>,
     },
+    Created {
+        conn_id: String,
+        name: String,
+        result: std::result::Result<(), String>,
+    },
     Status(String),
 }
 

@@ -362,6 +362,35 @@ impl App {
     /// Apply one drained job message to the matching session.
     pub fn apply_msg(&mut self, msg: UiMsg) {
         match msg {
+            UiMsg::Created {
+                conn_id,
+                name,
+                result,
+            } => {
+                let mut status = String::new();
+                {
+                    let Some(state) = self.sessions.get_mut(&conn_id) else {
+                        return;
+                    };
+                    state.busy = state.busy.saturating_sub(1);
+                    match result {
+                        Ok(()) => {
+                            status = format!("created {name}");
+                            self.new_dlg = None;
+                            let db = state.current_db.clone();
+                            drop(state);
+                            self.load_objects(&conn_id, db);
+                        }
+                        Err(e) => {
+                            status = format!("create failed: {e}");
+                            if let Some(d) = self.new_dlg.as_mut() {
+                                d.error = Some(e);
+                            }
+                        }
+                    }
+                }
+                self.status = status;
+            }
             UiMsg::Status(s) => self.status = s,
             UiMsg::Connected { conn_id, result } => match result {
                 Ok(session) => {
@@ -757,16 +786,7 @@ impl App {
                         .context_menu(|ui| {
                             if ui.button("New table…").clicked() {
                                 ui.close();
-                                actions.push(TreeAction::ShowTemplate(
-                                    "New table".into(),
-                                    r#"CREATE TABLE `new_table` (
-  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `name` VARCHAR(100) NOT NULL,
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"#
-                                        .into(),
-                                ));
+                                actions.push(TreeAction::NewObject(crate::new_dialog::NewKind::Table));
                             }
                         });
                     let views_group = ui.collapsing(
@@ -801,14 +821,7 @@ impl App {
                         .context_menu(|ui| {
                             if ui.button("New view…").clicked() {
                                 ui.close();
-                                actions.push(TreeAction::ShowTemplate(
-                                    "New view".into(),
-                                    r#"CREATE OR REPLACE VIEW `new_view` AS
-SELECT `id`, `name`
-FROM `users`
-WHERE `active` = 1;"#
-                                        .into(),
-                                ));
+                                actions.push(TreeAction::NewObject(crate::new_dialog::NewKind::View));
                             }
                         });
                     let routines_group = ui.collapsing(
@@ -848,37 +861,11 @@ WHERE `active` = 1;"#
                         .context_menu(|ui| {
                             if ui.button("New procedure…").clicked() {
                                 ui.close();
-                                actions.push(TreeAction::ShowTemplate(
-                                    "New procedure".into(),
-                                    r#"DELIMITER $$
-
-CREATE PROCEDURE `new_procedure`(IN p_id INT UNSIGNED)
-BEGIN
-  SELECT * FROM `users` WHERE `id` = p_id;
-END$$
-
-DELIMITER ;"#
-                                        .into(),
-                                ));
+                                actions.push(TreeAction::NewObject(crate::new_dialog::NewKind::Procedure));
                             }
                             if ui.button("New function…").clicked() {
                                 ui.close();
-                                actions.push(TreeAction::ShowTemplate(
-                                    "New function".into(),
-                                    r#"DELIMITER $$
-
-CREATE FUNCTION `new_function`(p_score DECIMAL(5,2))
-RETURNS VARCHAR(20)
-DETERMINISTIC
-BEGIN
-  IF p_score IS NULL THEN RETURN 'unknown';
-  ELSE RETURN 'ok';
-  END IF;
-END$$
-
-DELIMITER ;"#
-                                        .into(),
-                                ));
+                                actions.push(TreeAction::NewObject(crate::new_dialog::NewKind::Function));
                             }
                         });
                     let triggers_group = ui.collapsing(
@@ -912,13 +899,7 @@ DELIMITER ;"#
                         .context_menu(|ui| {
                             if ui.button("New trigger…").clicked() {
                                 ui.close();
-                                actions.push(TreeAction::ShowTemplate(
-                                    "New trigger".into(),
-                                    r#"CREATE TRIGGER `new_trigger`
-BEFORE INSERT ON `users` FOR EACH ROW
-SET NEW.`created_at` = NOW();"#
-                                        .into(),
-                                ));
+                                actions.push(TreeAction::NewObject(crate::new_dialog::NewKind::Trigger));
                             }
                         });
                     let events_group = ui.collapsing(
@@ -952,14 +933,7 @@ SET NEW.`created_at` = NOW();"#
                         .context_menu(|ui| {
                             if ui.button("New event…").clicked() {
                                 ui.close();
-                                actions.push(TreeAction::ShowTemplate(
-                                    "New event".into(),
-                                    r#"CREATE EVENT `new_event`
-ON SCHEDULE EVERY 1 DAY
-DO
-  DELETE FROM `orders` WHERE `amount` < 0;"#
-                                        .into(),
-                                ));
+                                actions.push(TreeAction::NewObject(crate::new_dialog::NewKind::Event));
                             }
                         });
                 });
@@ -999,25 +973,8 @@ DO
                     };
                     self.run_query(&conn_id, idx, sql);
                 }
-                TreeAction::ShowTemplate(title, sql) => {
-                    let idx = {
-                        let Some(state) = self.sessions.get_mut(&conn_id) else {
-                            continue;
-                        };
-                        state.view = ActiveView::Query;
-                        let mut n = 1;
-                        let mut unique = title.clone();
-                        while state.queries.iter().any(|q| q.title == unique) {
-                            n += 1;
-                            unique = format!("{title} {n}");
-                        }
-                        let mut tab = QueryTab::new(unique);
-                        tab.code = sql;
-                        state.queries.push(tab);
-                        state.active_query = state.queries.len() - 1;
-                        state.queries.len() - 1
-                    };
-                    let _ = idx;
+                TreeAction::NewObject(kind) => {
+                    self.open_new_dialog(kind);
                 }
                 TreeAction::StartRename(kind, name) => {
                     if let Some(state) = self.sessions.get_mut(&conn_id) {
@@ -1185,7 +1142,7 @@ enum TreeAction {
     Select(ObjKind, String),
     Open(ObjKind, String),
     ShowDef(ObjKind, String, String),
-    ShowTemplate(String, String),
+    NewObject(crate::new_dialog::NewKind),
     StartRename(ObjKind, String),
     RenameValue(String),
     RenameCommit(bool, String, String),
