@@ -701,7 +701,9 @@ impl App {
                 }
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.collapsing(format!("Tables ({})", objects.tables.len()), |ui| {
+                    let tables_group = ui.collapsing(
+                        format!("Tables ({})", objects.tables.len()),
+                        |ui| {
                         for t in &objects.tables {
                             if !matches(&t.name) {
                                 continue;
@@ -750,7 +752,26 @@ impl App {
                             });
                         }
                     });
-                    ui.collapsing(format!("Views ({})", objects.views.len()), |ui| {
+                    tables_group
+                        .header_response
+                        .context_menu(|ui| {
+                            if ui.button("New table…").clicked() {
+                                ui.close();
+                                actions.push(TreeAction::ShowTemplate(
+                                    "New table".into(),
+                                    r#"CREATE TABLE `new_table` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name` VARCHAR(100) NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"#
+                                        .into(),
+                                ));
+                            }
+                        });
+                    let views_group = ui.collapsing(
+                        format!("Views ({})", objects.views.len()),
+                        |ui| {
                         for v in &objects.views {
                             if !matches(&v.name) {
                                 continue;
@@ -775,7 +796,24 @@ impl App {
                             }
                         }
                     });
-                    ui.collapsing(format!("Routines ({})", objects.routines.len()), |ui| {
+                    views_group
+                        .header_response
+                        .context_menu(|ui| {
+                            if ui.button("New view…").clicked() {
+                                ui.close();
+                                actions.push(TreeAction::ShowTemplate(
+                                    "New view".into(),
+                                    r#"CREATE OR REPLACE VIEW `new_view` AS
+SELECT `id`, `name`
+FROM `users`
+WHERE `active` = 1;"#
+                                        .into(),
+                                ));
+                            }
+                        });
+                    let routines_group = ui.collapsing(
+                        format!("Routines ({})", objects.routines.len()),
+                        |ui| {
                         for r in &objects.routines {
                             if !matches(&r.name) {
                                 continue;
@@ -805,7 +843,47 @@ impl App {
                             }
                         }
                     });
-                    ui.collapsing(format!("Triggers ({})", objects.triggers.len()), |ui| {
+                    routines_group
+                        .header_response
+                        .context_menu(|ui| {
+                            if ui.button("New procedure…").clicked() {
+                                ui.close();
+                                actions.push(TreeAction::ShowTemplate(
+                                    "New procedure".into(),
+                                    r#"DELIMITER $$
+
+CREATE PROCEDURE `new_procedure`(IN p_id INT UNSIGNED)
+BEGIN
+  SELECT * FROM `users` WHERE `id` = p_id;
+END$$
+
+DELIMITER ;"#
+                                        .into(),
+                                ));
+                            }
+                            if ui.button("New function…").clicked() {
+                                ui.close();
+                                actions.push(TreeAction::ShowTemplate(
+                                    "New function".into(),
+                                    r#"DELIMITER $$
+
+CREATE FUNCTION `new_function`(p_score DECIMAL(5,2))
+RETURNS VARCHAR(20)
+DETERMINISTIC
+BEGIN
+  IF p_score IS NULL THEN RETURN 'unknown';
+  ELSE RETURN 'ok';
+  END IF;
+END$$
+
+DELIMITER ;"#
+                                        .into(),
+                                ));
+                            }
+                        });
+                    let triggers_group = ui.collapsing(
+                        format!("Triggers ({})", objects.triggers.len()),
+                        |ui| {
                         for t in &objects.triggers {
                             if !matches(&t.name) {
                                 continue;
@@ -829,7 +907,23 @@ impl App {
                             }
                         }
                     });
-                    ui.collapsing(format!("Events ({})", objects.events.len()), |ui| {
+                    triggers_group
+                        .header_response
+                        .context_menu(|ui| {
+                            if ui.button("New trigger…").clicked() {
+                                ui.close();
+                                actions.push(TreeAction::ShowTemplate(
+                                    "New trigger".into(),
+                                    r#"CREATE TRIGGER `new_trigger`
+BEFORE INSERT ON `users` FOR EACH ROW
+SET NEW.`created_at` = NOW();"#
+                                        .into(),
+                                ));
+                            }
+                        });
+                    let events_group = ui.collapsing(
+                        format!("Events ({})", objects.events.len()),
+                        |ui| {
                         for e in &objects.events {
                             if !matches(&e.name) {
                                 continue;
@@ -853,6 +947,21 @@ impl App {
                             }
                         }
                     });
+                    events_group
+                        .header_response
+                        .context_menu(|ui| {
+                            if ui.button("New event…").clicked() {
+                                ui.close();
+                                actions.push(TreeAction::ShowTemplate(
+                                    "New event".into(),
+                                    r#"CREATE EVENT `new_event`
+ON SCHEDULE EVERY 1 DAY
+DO
+  DELETE FROM `orders` WHERE `amount` < 0;"#
+                                        .into(),
+                                ));
+                            }
+                        });
                 });
             });
 
@@ -889,6 +998,26 @@ impl App {
                         idx
                     };
                     self.run_query(&conn_id, idx, sql);
+                }
+                TreeAction::ShowTemplate(title, sql) => {
+                    let idx = {
+                        let Some(state) = self.sessions.get_mut(&conn_id) else {
+                            continue;
+                        };
+                        state.view = ActiveView::Query;
+                        let mut n = 1;
+                        let mut unique = title.clone();
+                        while state.queries.iter().any(|q| q.title == unique) {
+                            n += 1;
+                            unique = format!("{title} {n}");
+                        }
+                        let mut tab = QueryTab::new(unique);
+                        tab.code = sql;
+                        state.queries.push(tab);
+                        state.active_query = state.queries.len() - 1;
+                        state.queries.len() - 1
+                    };
+                    let _ = idx;
                 }
                 TreeAction::StartRename(kind, name) => {
                     if let Some(state) = self.sessions.get_mut(&conn_id) {
@@ -1056,6 +1185,7 @@ enum TreeAction {
     Select(ObjKind, String),
     Open(ObjKind, String),
     ShowDef(ObjKind, String, String),
+    ShowTemplate(String, String),
     StartRename(ObjKind, String),
     RenameValue(String),
     RenameCommit(bool, String, String),

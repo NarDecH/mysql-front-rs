@@ -75,6 +75,16 @@ switch ($Cmd) {
         Start-Sleep -Milliseconds 400
         Write-Output "double-clicked $x $y"
     }
+    "rclick" {
+        Show-Window | Out-Null
+        $x = [int]$Arg1; $y = [int]$Arg2
+        [Win]::SetCursorPos($x, $y) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [Win]::mouse_event(0x0008, 0, 0, 0, [UIntPtr]::Zero)  # right down
+        [Win]::mouse_event(0x0010, 0, 0, 0, [UIntPtr]::Zero)  # right up
+        Start-Sleep -Milliseconds 450
+        Write-Output "right-clicked $x $y"
+    }
     "type" {
         Show-Window | Out-Null
         [System.Windows.Forms.SendKeys]::SendWait($Arg1)
