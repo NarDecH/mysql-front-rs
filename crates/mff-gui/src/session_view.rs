@@ -466,7 +466,7 @@ impl App {
 
     /// Render the workspace of the active session.
     pub fn show_session(&mut self, ctx: &Context, conn_id: String) {
-        let (conn_name, version, current_db, has_databases) = {
+        let (conn_name, version, current_db) = {
             let Some(state) = self.sessions.get(&conn_id) else {
                 return;
             };
@@ -474,7 +474,6 @@ impl App {
                 state.conn_name.clone(),
                 state.version.clone(),
                 state.current_db.clone(),
-                !state.databases.is_empty(),
             )
         };
 
@@ -498,17 +497,19 @@ impl App {
                     .map(|s| s.databases.clone())
                     .unwrap_or_default();
                 let mut db = current_db.clone();
-                let combo = egui::ComboBox::from_id_salt("db_combo")
-                    .selected_text(if db.is_empty() { "—" } else { &db });
-                if has_databases && combo.show_ui(ui, |ui| {
-                    ui.selectable_value(&mut db, String::new(), "—");
-                    for d in &dbs {
-                        ui.selectable_value(&mut db, d.clone(), d);
-                    }
-                })
-                .response
-                .changed()
-                {
+                // egui's ComboBox response does not report `.changed()` for
+                // clicks on the selectable items inside the popup, so detect
+                // the selection by comparing the value before/after show_ui.
+                let before = db.clone();
+                egui::ComboBox::from_id_salt("db_combo")
+                    .selected_text(if db.is_empty() { "—" } else { &db })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut db, String::new(), "—");
+                        for d in &dbs {
+                            ui.selectable_value(&mut db, d.clone(), d);
+                        }
+                    });
+                if db != before {
                     if let Some(state) = self.sessions.get_mut(&conn_id) {
                         state.current_db = db.clone();
                         state.objects = None;
