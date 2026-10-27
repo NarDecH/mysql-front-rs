@@ -203,7 +203,19 @@ impl App {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let can_act = !editor.conn.name.trim().is_empty() && !editor.testing;
-                    if ui.add_enabled(can_act, egui::Button::new("Save")).clicked() {
+                    if ui
+                        .add_enabled(
+                            can_act,
+                            egui::Button::new(
+                                egui::RichText::new("Save")
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(crate::theme::accent(ui.ctx()))
+                            .min_size(egui::vec2(0.0, 24.0)),
+                        )
+                        .clicked()
+                    {
                         save_clicked = true;
                     }
                     if ui
@@ -371,7 +383,13 @@ impl App {
                         if ui
                             .add_enabled(
                                 can,
-                                egui::Button::new(format!("Export {rows} rows")),
+                                egui::Button::new(
+                                    egui::RichText::new(format!("Export {rows} rows"))
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(crate::theme::accent(ui.ctx()))
+                                .min_size(egui::vec2(0.0, 24.0)),
                             )
                             .clicked()
                         {

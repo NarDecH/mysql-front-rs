@@ -86,9 +86,16 @@ impl App {
                 return;
             };
             ui.horizontal(|ui| {
+                let c = crate::theme::accent(ui.ctx());
                 let run = ui.add_enabled(
                     !tab.running,
-                    egui::Button::new(egui::RichText::new("▶ Run (Ctrl+Enter)").strong()),
+                    egui::Button::new(
+                        egui::RichText::new("▶ Run (Ctrl+Enter)")
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(c)
+                    .min_size(egui::vec2(0.0, 24.0)),
                 );
                 if run.clicked() {
                     run_clicked = true;

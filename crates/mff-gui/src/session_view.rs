@@ -575,10 +575,12 @@ impl App {
                             if !matches(&t.name) {
                                 continue;
                             }
-                            let resp = ui.add(
-                                egui::Label::new(egui::RichText::new(format!("▤ {}", t.name)))
-                                    .sense(egui::Sense::click()),
-                            );
+                            let resp = crate::theme::icon_label(
+                                ui,
+                                &crate::theme::table_icon(),
+                                &t.name,
+                            )
+                            .interact(egui::Sense::click());
                             if resp.clicked() {
                                 open_table = Some(t.name.clone());
                             }
@@ -603,10 +605,12 @@ impl App {
                             if !matches(&v.name) {
                                 continue;
                             }
-                            let resp = ui.add(
-                                egui::Label::new(egui::RichText::new(format!("◫ {}", v.name)))
-                                    .sense(egui::Sense::click()),
-                            );
+                            let resp = crate::theme::icon_label(
+                                ui,
+                                &crate::theme::view_icon(),
+                                &v.name,
+                            )
+                            .interact(egui::Sense::click());
                             if resp.clicked() {
                                 open_table = Some(v.name.clone());
                             }
@@ -617,7 +621,11 @@ impl App {
                             if !matches(&r.name) {
                                 continue;
                             }
-                            ui.label(format!("ƒ {}", r.name));
+                            crate::theme::icon_label(
+                                ui,
+                                &crate::theme::routine_icon(),
+                                &r.name,
+                            );
                         }
                     });
                     ui.collapsing(format!("Triggers ({})", objects.triggers.len()), |ui| {
@@ -625,7 +633,11 @@ impl App {
                             if !matches(&t.name) {
                                 continue;
                             }
-                            ui.label(format!("⚡ {}", t.name));
+                            crate::theme::icon_label(
+                                ui,
+                                &crate::theme::trigger_icon(),
+                                &t.name,
+                            );
                         }
                     });
                     ui.collapsing(format!("Events ({})", objects.events.len()), |ui| {
@@ -633,7 +645,11 @@ impl App {
                             if !matches(&e.name) {
                                 continue;
                             }
-                            ui.label(format!("⏰ {}", e.name));
+                            crate::theme::icon_label(
+                                ui,
+                                &crate::theme::event_icon(),
+                                &e.name,
+                            );
                         }
                     });
                 });

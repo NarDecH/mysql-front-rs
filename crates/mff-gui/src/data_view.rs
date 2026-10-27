@@ -44,7 +44,11 @@ impl App {
             // ── Toolbar ────────────────────────────────────────────────
             let mut apply_filter = false;
             ui.horizontal(|ui| {
-                ui.strong(format!("▤ {}.{}", state.current_db, d.table));
+                crate::theme::icon_label(
+                    ui,
+                    &crate::theme::table_icon(),
+                    &format!("{}.{}", state.current_db, d.table),
+                );
                 ui.separator();
                 if d.loading {
                     ui.spinner();

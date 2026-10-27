@@ -21,6 +21,7 @@ pub struct App {
     pub confirm_delete: Option<String>,
     pub connect_error: Option<String>,
     pub font_note: Option<String>,
+    pub theme: egui::Theme,
 }
 
 impl App {
@@ -42,6 +43,31 @@ impl App {
             confirm_delete: None,
             connect_error: None,
             font_note,
+            theme: egui::Theme::Light,
+        }
+    }
+
+    /// Switch between the light and dark theme.
+    pub fn toggle_theme(&mut self, ctx: &Context) {
+        self.theme = match self.theme {
+            egui::Theme::Dark => egui::Theme::Light,
+            egui::Theme::Light => egui::Theme::Dark,
+        };
+        ctx.set_theme(self.theme);
+    }
+
+    /// The theme toggle button (shows the theme you would switch to).
+    pub fn theme_button(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+        let label = match self.theme {
+            egui::Theme::Dark => "☀",
+            egui::Theme::Light => "🌙",
+        };
+        if ui
+            .button(label)
+            .on_hover_text("Toggle light/dark theme")
+            .clicked()
+        {
+            self.toggle_theme(ctx);
         }
     }
 
@@ -74,6 +100,7 @@ impl App {
                 ui.weak(format!("v{}", mff_core::VERSION));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
+                    self.theme_button(ui, ctx);
                     if ui.button("＋ New connection").clicked() {
                         self.open_conn_editor(None);
                     }
@@ -147,7 +174,7 @@ impl App {
                                 });
                                 row.col(|ui| {
                                     ui.horizontal(|ui| {
-                                        if ui.small_button("Connect").clicked() {
+                                        if crate::theme::primary_button(ui, "Connect").clicked() {
                                             connect_id = Some(c.id.clone());
                                         }
                                         if ui.small_button("Edit").clicked() {
@@ -247,6 +274,7 @@ impl App {
                 if ui.small_button("⌂ Connections").clicked() {
                     self.active_conn = None;
                 }
+                self.theme_button(ui, ctx);
                 ui.separator();
                 // Copy button + Ctrl+C inside the data view.
                 if ui

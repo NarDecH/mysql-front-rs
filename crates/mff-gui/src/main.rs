@@ -14,19 +14,36 @@ mod jobs;
 mod query_view;
 mod session_view;
 mod structure_view;
+mod theme;
+
+/// Decode the embedded logo for the window / taskbar icon.
+fn load_icon() -> egui::IconData {
+    let png = include_bytes!("../assets/logo_256.png");
+    let img = image::load_from_memory(png).expect("embedded logo").to_rgba8();
+    let (width, height) = img.dimensions();
+    egui::IconData {
+        width,
+        height,
+        rgba: img.into_raw(),
+    }
+}
 
 fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([900.0, 560.0])
-            .with_title("mysql-front-rs"),
+            .with_title("mysql-front-rs")
+            .with_icon(std::sync::Arc::new(load_icon())),
         ..Default::default()
     };
     eframe::run_native(
         "mysql-front-rs",
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(|cc| {
+            theme::install(&cc.egui_ctx);
+            Ok(Box::new(app::App::new(cc)))
+        }),
     )
     .expect("failed to start the GUI");
 }
