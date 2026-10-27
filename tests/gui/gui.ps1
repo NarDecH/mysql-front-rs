@@ -62,6 +62,19 @@ switch ($Cmd) {
         Start-Sleep -Milliseconds 350
         Write-Output "clicked $x $y"
     }
+    "dblclick" {
+        Show-Window | Out-Null
+        $x = [int]$Arg1; $y = [int]$Arg2
+        [Win]::SetCursorPos($x, $y) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+        [Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
+        [Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+        [Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 400
+        Write-Output "double-clicked $x $y"
+    }
     "type" {
         Show-Window | Out-Null
         [System.Windows.Forms.SendKeys]::SendWait($Arg1)

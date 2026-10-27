@@ -28,10 +28,20 @@ pub struct SessionState {
     pub tree_filter: String,
     pub busy: usize,
     pub error: Option<String>,
-    /// Explorer-style tree selection: (is_view, name).
-    pub tree_selected: Option<(bool, String)>,
+    /// Explorer-style tree selection.
+    pub tree_selected: Option<(ObjKind, String)>,
     /// Active inline rename, if any.
     pub tree_rename: Option<TreeRename>,
+}
+
+/// Kind of object selected in the tree (drives the highlight).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjKind {
+    Table,
+    View,
+    Routine,
+    Trigger,
+    Event,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -668,10 +678,10 @@ impl App {
                     .unwrap_or_default();
                 let matches =
                     |name: &str| filter.is_empty() || name.to_lowercase().contains(&filter);
-                let is_sel = |is_view: bool, name: &str| -> bool {
+                let is_sel = |kind: ObjKind, name: &str| -> bool {
                     match tree_selected.as_ref() {
-                        Some((v, n)) => *v == is_view && n == name,
-                        None => browsed == name,
+                        Some((k, n)) => *k == kind && n == name,
+                        None => matches!(kind, ObjKind::Table | ObjKind::View) && browsed == name,
                     }
                 };
                 let renaming = |is_view: bool, name: &str| -> bool {
@@ -683,9 +693,9 @@ impl App {
 
                 // F2 renames the selected entry.
                 if tree_rename.is_none() {
-                    if let Some((is_view, name)) = &tree_selected {
+                    if let Some((kind, name)) = &tree_selected {
                         if ui.input(|i| i.key_pressed(egui::Key::F2)) {
-                            actions.push(TreeAction::StartRename(*is_view, name.clone()));
+                            actions.push(TreeAction::StartRename(*kind, name.clone()));
                         }
                     }
                 }
@@ -709,21 +719,18 @@ impl App {
                                 ui,
                                 &crate::theme::table_icon(),
                                 &t.name,
-                                is_sel(false, &t.name),
+                                is_sel(ObjKind::Table, &t.name),
                             );
-                            if resp.double_clicked() {
-                                actions.push(TreeAction::Open(false, t.name.clone()));
-                            } else if resp.clicked() {
-                                if is_sel(false, &t.name) {
-                                    actions.push(TreeAction::StartRename(false, t.name.clone()));
-                                } else {
-                                    actions.push(TreeAction::Select(false, t.name.clone()));
-                                }
+                            if resp.clicked() || resp.double_clicked() {
+                                actions.push(TreeAction::Open(ObjKind::Table, t.name.clone()));
                             }
                             resp.context_menu(|ui| {
                                 if ui.button("Show data").clicked() {
                                     ui.close();
-                                    actions.push(TreeAction::Open(false, t.name.clone()));
+                                    actions.push(TreeAction::Open(
+                                        ObjKind::Table,
+                                        t.name.clone(),
+                                    ));
                                 }
                                 if ui.button("Show structure").clicked() {
                                     ui.close();
@@ -731,7 +738,10 @@ impl App {
                                 }
                                 if ui.button("Rename").clicked() {
                                     ui.close();
-                                    actions.push(TreeAction::StartRename(false, t.name.clone()));
+                                    actions.push(TreeAction::StartRename(
+                                        ObjKind::Table,
+                                        t.name.clone(),
+                                    ));
                                 }
                                 if ui.button("Export…").clicked() {
                                     ui.close();
@@ -758,16 +768,10 @@ impl App {
                                 ui,
                                 &crate::theme::view_icon(),
                                 &v.name,
-                                is_sel(true, &v.name),
+                                is_sel(ObjKind::View, &v.name),
                             );
-                            if resp.double_clicked() {
-                                actions.push(TreeAction::Open(true, v.name.clone()));
-                            } else if resp.clicked() {
-                                if is_sel(true, &v.name) {
-                                    actions.push(TreeAction::StartRename(true, v.name.clone()));
-                                } else {
-                                    actions.push(TreeAction::Select(true, v.name.clone()));
-                                }
+                            if resp.clicked() || resp.double_clicked() {
+                                actions.push(TreeAction::Open(ObjKind::View, v.name.clone()));
                             }
                         }
                     });
@@ -776,11 +780,29 @@ impl App {
                             if !matches(&r.name) {
                                 continue;
                             }
-                            crate::theme::icon_label(
+                            let resp = crate::theme::icon_label_sel(
                                 ui,
                                 &crate::theme::routine_icon(),
                                 &r.name,
+                                is_sel(ObjKind::Routine, &r.name),
                             );
+                            if resp.clicked() || resp.double_clicked() {
+                                let kw = if r.kind.eq_ignore_ascii_case("FUNCTION") {
+                                    "FUNCTION"
+                                } else {
+                                    "PROCEDURE"
+                                };
+                                let sql = format!(
+                                    "SHOW CREATE {} {}",
+                                    kw,
+                                    mff_core::sqlgen::quote_qualified(&[&current_db, &r.name])
+                                );
+                                actions.push(TreeAction::ShowDef(
+                                    ObjKind::Routine,
+                                    r.name.clone(),
+                                    sql,
+                                ));
+                            }
                         }
                     });
                     ui.collapsing(format!("Triggers ({})", objects.triggers.len()), |ui| {
@@ -788,11 +810,23 @@ impl App {
                             if !matches(&t.name) {
                                 continue;
                             }
-                            crate::theme::icon_label(
+                            let resp = crate::theme::icon_label_sel(
                                 ui,
                                 &crate::theme::trigger_icon(),
                                 &t.name,
+                                is_sel(ObjKind::Trigger, &t.name),
                             );
+                            if resp.clicked() || resp.double_clicked() {
+                                let sql = format!(
+                                    "SHOW CREATE TRIGGER {}",
+                                    mff_core::sqlgen::quote_qualified(&[&current_db, &t.name])
+                                );
+                                actions.push(TreeAction::ShowDef(
+                                    ObjKind::Trigger,
+                                    t.name.clone(),
+                                    sql,
+                                ));
+                            }
                         }
                     });
                     ui.collapsing(format!("Events ({})", objects.events.len()), |ui| {
@@ -800,11 +834,23 @@ impl App {
                             if !matches(&e.name) {
                                 continue;
                             }
-                            crate::theme::icon_label(
+                            let resp = crate::theme::icon_label_sel(
                                 ui,
                                 &crate::theme::event_icon(),
                                 &e.name,
+                                is_sel(ObjKind::Event, &e.name),
                             );
+                            if resp.clicked() || resp.double_clicked() {
+                                let sql = format!(
+                                    "SHOW CREATE EVENT {}",
+                                    mff_core::sqlgen::quote_qualified(&[&current_db, &e.name])
+                                );
+                                actions.push(TreeAction::ShowDef(
+                                    ObjKind::Event,
+                                    e.name.clone(),
+                                    sql,
+                                ));
+                            }
                         }
                     });
                 });
@@ -813,23 +859,43 @@ impl App {
         // Deferred tree actions.
         for action in actions {
             match action {
-                TreeAction::Select(is_view, name) => {
+                TreeAction::Select(kind, name) => {
                     if let Some(state) = self.sessions.get_mut(&conn_id) {
-                        state.tree_selected = Some((is_view, name));
+                        state.tree_selected = Some((kind, name));
                     }
                 }
-                TreeAction::Open(is_view, name) => {
+                TreeAction::Open(kind, name) => {
                     if let Some(state) = self.sessions.get_mut(&conn_id) {
-                        state.tree_selected = Some((is_view, name.clone()));
+                        state.tree_selected = Some((kind, name.clone()));
                     }
                     open_data(self, &conn_id, name);
                 }
-                TreeAction::StartRename(is_view, name) => {
+                TreeAction::ShowDef(kind, name, sql) => {
+                    let idx = {
+                        let Some(state) = self.sessions.get_mut(&conn_id) else {
+                            continue;
+                        };
+                        state.tree_selected = Some((kind, name.clone()));
+                        state.view = ActiveView::Query;
+                        let title = format!("Def: {name}");
+                        let idx = match state.queries.iter().position(|q| q.title == title) {
+                            Some(i) => i,
+                            None => {
+                                state.queries.push(QueryTab::new(title));
+                                state.queries.len() - 1
+                            }
+                        };
+                        state.active_query = idx;
+                        idx
+                    };
+                    self.run_query(&conn_id, idx, sql);
+                }
+                TreeAction::StartRename(kind, name) => {
                     if let Some(state) = self.sessions.get_mut(&conn_id) {
                         if state.tree_rename.is_none() {
-                            state.tree_selected = Some((is_view, name.clone()));
+                            state.tree_selected = Some((kind, name.clone()));
                             state.tree_rename = Some(TreeRename {
-                                is_view,
+                                is_view: kind == ObjKind::View,
                                 old: name.clone(),
                                 value: name,
                                 just_started: true,
@@ -987,9 +1053,10 @@ pub fn open_structure(app: &mut App, conn_id: &str, table: String) {
 
 /// Deferred interactions collected while rendering the object browser.
 enum TreeAction {
-    Select(bool, String),
-    Open(bool, String),
-    StartRename(bool, String),
+    Select(ObjKind, String),
+    Open(ObjKind, String),
+    ShowDef(ObjKind, String, String),
+    StartRename(ObjKind, String),
     RenameValue(String),
     RenameCommit(bool, String, String),
     RenameCancel,
