@@ -1,4 +1,0 @@
-id,name,email,score,bio,avatar,active,created_at
-1,สมชาย ใจดี,somchai@example.com,88.50,หัวหน้าทีม -- ถนัด Rust,0xDEADBEEF,1,2024-01-15 09:30:00
-2,Anna O'Brien,anna@example.com,72.00,"line1
-line2	with \backslash",NULL,1,2024-02-20 14:05:00

@@ -1,3 +1,0 @@
-SELECT 1;
-SELECTT broken;
-SELECT 2;
