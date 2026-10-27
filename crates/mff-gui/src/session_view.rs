@@ -567,6 +567,12 @@ impl App {
                     .get(&conn_id)
                     .map(|s| s.tree_filter.to_lowercase())
                     .unwrap_or_default();
+                // The table currently being browsed gets highlighted.
+                let browsed = self
+                    .sessions
+                    .get(&conn_id)
+                    .map(|s| s.data.table.clone())
+                    .unwrap_or_default();
                 let matches =
                     |name: &str| filter.is_empty() || name.to_lowercase().contains(&filter);
 
@@ -576,12 +582,12 @@ impl App {
                             if !matches(&t.name) {
                                 continue;
                             }
-                            let resp = crate::theme::icon_label(
+                            let resp = crate::theme::icon_label_sel(
                                 ui,
                                 &crate::theme::table_icon(),
                                 &t.name,
-                            )
-                            .interact(egui::Sense::click());
+                                browsed == t.name,
+                            );
                             if resp.clicked() {
                                 open_table = Some(t.name.clone());
                             }
@@ -606,12 +612,12 @@ impl App {
                             if !matches(&v.name) {
                                 continue;
                             }
-                            let resp = crate::theme::icon_label(
+                            let resp = crate::theme::icon_label_sel(
                                 ui,
                                 &crate::theme::view_icon(),
                                 &v.name,
-                            )
-                            .interact(egui::Sense::click());
+                                browsed == v.name,
+                            );
                             if resp.clicked() {
                                 open_table = Some(v.name.clone());
                             }

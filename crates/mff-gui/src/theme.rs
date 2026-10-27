@@ -80,8 +80,23 @@ pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 
 /// Draw one object-browser entry: coloured glyph + normal text.
 pub fn icon_label(ui: &mut egui::Ui, icon: &ObjIcon, text: &str) -> egui::Response {
+    icon_label_sel(ui, icon, text, false)
+}
+
+/// Same as [`icon_label`], but highlights the row when `selected` — used to
+/// mark the table/view currently being browsed.
+pub fn icon_label_sel(
+    ui: &mut egui::Ui,
+    icon: &ObjIcon,
+    text: &str,
+    selected: bool,
+) -> egui::Response {
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let fg = ui.visuals().text_color();
+    let fg = if selected {
+        accent(ui.ctx())
+    } else {
+        ui.visuals().text_color()
+    };
     let mut job = egui::text::LayoutJob::default();
     job.append(
         icon.glyph,
@@ -89,5 +104,17 @@ pub fn icon_label(ui: &mut egui::Ui, icon: &ObjIcon, text: &str) -> egui::Respon
         egui::text::TextFormat::simple(font.clone(), icon.color),
     );
     job.append(text, 0.0, egui::text::TextFormat::simple(font, fg));
-    ui.add(egui::Label::new(job))
+
+    let mut label = egui::Label::new(job).sense(egui::Sense::click());
+    if !selected {
+        return ui.add(label);
+    }
+    let c = accent(ui.ctx());
+    egui::Frame::new()
+        .fill(c.gamma_multiply(0.22))
+        .stroke(egui::Stroke::new(1.0, c))
+        .corner_radius(3.0)
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, |ui| ui.add(label))
+        .inner
 }
