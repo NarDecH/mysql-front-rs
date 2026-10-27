@@ -66,6 +66,11 @@ pub enum UiMsg {
         name: String,
         result: std::result::Result<(), String>,
     },
+    DbRenamed {
+        conn_id: String,
+        new_db: String,
+        result: std::result::Result<(), String>,
+    },
     Status(String),
 }
 

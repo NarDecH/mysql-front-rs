@@ -23,6 +23,7 @@ pub struct App {
     pub font_note: Option<String>,
     pub theme: egui::Theme,
     pub new_dlg: Option<crate::new_dialog::NewDialog>,
+    pub db_rename_dlg: Option<crate::db_rename::DbRenameDialog>,
 }
 
 impl App {
@@ -46,6 +47,7 @@ impl App {
             font_note,
             theme: egui::Theme::Light,
             new_dlg: None,
+            db_rename_dlg: None,
         }
     }
 
@@ -329,6 +331,17 @@ impl eframe::App for App {
                     self.show_new_dialog(ctx, &id);
                 } else {
                     self.new_dlg = None;
+                }
+            }
+        }
+
+        // "Rename database" modal.
+        if self.db_rename_dlg.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_db_rename_dialog(ctx, &id);
+                } else {
+                    self.db_rename_dlg = None;
                 }
             }
         }

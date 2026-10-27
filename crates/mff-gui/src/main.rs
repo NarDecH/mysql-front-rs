@@ -7,6 +7,7 @@
 
 mod app;
 mod data_view;
+mod db_rename;
 mod dialogs;
 mod fonts;
 mod info_view;

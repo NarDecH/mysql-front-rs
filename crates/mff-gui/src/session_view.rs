@@ -391,6 +391,30 @@ impl App {
                 }
                 self.status = status;
             }
+            UiMsg::DbRenamed {
+                conn_id,
+                new_db,
+                result,
+            } => {
+                let Some(state) = self.sessions.get_mut(&conn_id) else {
+                    return;
+                };
+                state.busy = state.busy.saturating_sub(1);
+                match result {
+                    Ok(()) => {
+                        state.current_db = new_db.clone();
+                        state.objects = None;
+                        state.tree_selected = None;
+                        state.tree_rename = None;
+                        self.status = format!("database renamed to {new_db}");
+                        self.load_objects(&conn_id, new_db);
+                    }
+                    Err(e) => {
+                        state.error = Some(format!("rename database failed: {e}"));
+                        self.status = format!("rename database failed: {e}");
+                    }
+                }
+            }
             UiMsg::Status(s) => self.status = s,
             UiMsg::Connected { conn_id, result } => match result {
                 Ok(session) => {
@@ -597,6 +621,7 @@ impl App {
         };
 
         // ── Top bar ────────────────────────────────────────────────────
+        let mut open_db_rename: Option<String> = None;
         egui::TopBottomPanel::top("session_top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("⏻ Disconnect").clicked() {
@@ -637,11 +662,22 @@ impl App {
                         self.load_objects(&conn_id, db);
                     }
                 }
+
+                ui.menu_button("⋯", |ui| {
+                    if ui.button("Rename database…").clicked() {
+                        ui.close();
+                        open_db_rename = Some(current_db.clone());
+                    }
+                });
                 if ui.button("⟳ Refresh").clicked() {
                     self.load_databases(&conn_id);
                 }
             });
         });
+
+        if let Some(old) = open_db_rename {
+            self.open_db_rename(old);
+        }
 
         // ── Left: object browser ───────────────────────────────────────
         // The tree renders from a snapshot of the object lists; interactions
