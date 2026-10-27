@@ -354,9 +354,16 @@ impl App {
                             ui.end_row();
                         });
 
-                    if let Some(msg) = &d.message {
-                        ui.label(msg);
-                    }
+                    // Fixed-height message area: long paths wrap/scroll
+                    // instead of pushing the buttons down.
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(44.0)
+                        .show(ui, |ui| {
+                            if let Some(msg) = &d.message {
+                                ui.label(msg);
+                            }
+                        });
 
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
