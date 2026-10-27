@@ -703,6 +703,18 @@ fn tab_button(
         if let Some(state) = app.sessions.get_mut(conn_id) {
             state.view = this;
         }
+        // Switching to Structure follows the table being browsed in the
+        // data view, loading its schema if not already shown.
+        if this == ActiveView::Structure {
+            let (browsed, loaded) = app
+                .sessions
+                .get(conn_id)
+                .map(|s| (s.data.table.clone(), s.structure.table.clone()))
+                .unwrap_or_default();
+            if !browsed.is_empty() && browsed != loaded {
+                app.load_schema(conn_id, browsed);
+            }
+        }
     }
 }
 
