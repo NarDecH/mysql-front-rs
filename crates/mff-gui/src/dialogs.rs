@@ -52,6 +52,14 @@ pub struct ExportDlg {
     pub include_create: bool,
     pub batch_size: usize,
     pub message: Option<String>,
+    /// The table's WHERE filter at the time the dialog was opened.
+    pub where_clause: String,
+    /// The table's ORDER BY at the time the dialog was opened.
+    pub order_by: Option<(String, bool)>,
+    /// True while the background export is running.
+    pub running: bool,
+    /// Apply the WHERE/ORDER BY the data view currently uses.
+    pub apply_filter: bool,
 }
 
 impl ExportDlg {
@@ -62,6 +70,7 @@ impl ExportDlg {
             null_text: "NULL".into(),
             batch_size: 1000,
             include_create: true,
+            apply_filter: true,
             ..Default::default()
         }
     }
@@ -274,19 +283,32 @@ impl App {
 
     /// Show the export dialog bound to the data view of one session.
     pub fn show_export_dialog(&mut self, ctx: &Context, conn_id: &str) {
-        let (table, rows) = self
+        // Snapshot the data view's filter/sort when the dialog opens, and
+        // reflect any later changes while it stays open.
+        {
+            let (filter, sort) = self
+                .sessions
+                .get(conn_id)
+                .map(|s| (s.data.filter_applied.clone(), s.data.sort.clone()))
+                .unwrap_or_default();
+            let dlg = self.export_dlg.get_or_insert_with(ExportDlg::new);
+            dlg.where_clause = filter;
+            dlg.order_by = sort;
+        }
+        let rows = self
             .sessions
             .get(conn_id)
-            .map(|s| {
-                (
-                    s.data.table.clone(),
-                    s.data.grid.as_ref().map(|g| g.row_count()).unwrap_or(0),
-                )
-            })
-            .unwrap_or_default();
+            .and_then(|s| s.data.grid.as_ref())
+            .map(|g| g.row_count())
+            .unwrap_or(0);
 
         let mut export_clicked = false;
         let mut close_clicked = false;
+        let table = self
+            .sessions
+            .get(conn_id)
+            .map(|s| s.data.table.clone())
+            .unwrap_or_default();
         {
             let dlg = self.export_dlg.get_or_insert_with(ExportDlg::new);
             let mut open = true;
@@ -366,6 +388,29 @@ impl App {
                             ui.end_row();
                         });
 
+                    // Scope: the WHERE/ORDER BY currently in use.
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut d.apply_filter, "");
+                        let scope = if d.where_clause.is_empty() {
+                            "whole table".to_string()
+                        } else {
+                            let order = d
+                                .order_by
+                                .as_ref()
+                                .map(|(c, asc)| {
+                                    format!(" ORDER BY {c} {}", if *asc { "ASC" } else { "DESC" })
+                                })
+                                .unwrap_or_default();
+                            format!("WHERE {}{order}", d.where_clause)
+                        };
+                        ui.label(format!("Scope: {scope}"));
+                    });
+                    ui.weak(if d.apply_filter {
+                        "exports every matching row (not just the current page)"
+                    } else {
+                        "exports every row of the table"
+                    });
+
                     // Fixed-height message area: long paths wrap/scroll
                     // instead of pushing the buttons down.
                     egui::ScrollArea::vertical()
@@ -379,14 +424,18 @@ impl App {
 
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let can = !d.path.trim().is_empty() && rows > 0;
+                        let can = !d.path.trim().is_empty() && rows > 0 && !d.running;
                         if ui
                             .add_enabled(
                                 can,
                                 egui::Button::new(
-                                    egui::RichText::new(format!("Export {rows} rows"))
-                                        .strong()
-                                        .color(egui::Color32::WHITE),
+                                    egui::RichText::new(if d.running {
+                                        "exporting…".to_string()
+                                    } else {
+                                        format!("Export {rows}+ rows")
+                                    })
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
                                 )
                                 .fill(crate::theme::accent(ui.ctx()))
                                 .min_size(egui::vec2(0.0, 24.0)),
@@ -394,6 +443,9 @@ impl App {
                             .clicked()
                         {
                             export_clicked = true;
+                        }
+                        if d.running {
+                            ui.spinner();
                         }
                         if ui.button("Close").clicked() {
                             close_clicked = true;
@@ -411,18 +463,113 @@ impl App {
             }
             self.export_dlg = None;
         } else if export_clicked {
-            // Snapshot the dialog options, then run the export.
+            // Snapshot the dialog options and run the export in the
+            // background (large tables must not block the UI thread).
             if let Some(snapshot) = self.export_dlg.clone() {
-                let result = run_export(self, conn_id, &snapshot);
-                if let Some(dlg) = self.export_dlg.as_mut() {
-                    dlg.message = Some(match result {
-                        Ok(n) => format!("✓ exported {n} row(s) to {}", dlg.path),
-                        Err(e) => format!("✗ {e}"),
-                    });
-                }
+                self.run_export_background(conn_id, snapshot);
             }
         }
     }
+
+    /// Export every row matching the current scope in the background.
+    fn run_export_background(&mut self, conn_id: &str, dlg: ExportDlg) {
+        let Some(state) = self.sessions.get_mut(conn_id) else {
+            return;
+        };
+        let d = &state.data;
+        let Some(grid) = &d.grid else { return };
+        if grid.row_count() == 0 {
+            if let Some(dl) = self.export_dlg.as_mut() {
+                dl.message = Some("✗ no data loaded".into());
+            }
+            return;
+        }
+        let schema = if dlg.format == ExportFormat::Sql && dlg.include_create {
+            state.structure.schema.clone()
+        } else {
+            None
+        };
+        let session = state.session.clone();
+        let db = state.current_db.clone();
+        let table = d.table.clone();
+        let (where_clause, order_by, apply) = (
+            dlg.where_clause.clone(),
+            dlg.order_by.clone(),
+            dlg.apply_filter,
+        );
+        let tx = self.jobs.sender();
+        let id = conn_id.to_string();
+        state.busy += 1;
+        if let Some(dl) = self.export_dlg.as_mut() {
+            dl.running = true;
+            dl.message = Some("exporting…".into());
+        }
+        self.status = "exporting…".into();
+        std::thread::spawn(move || {
+            let result = run_export_job(
+                &session,
+                &db,
+                &table,
+                schema.as_ref(),
+                &dlg,
+                &where_clause,
+                &order_by,
+                apply,
+            );
+            let _ = tx.send(crate::jobs::UiMsg::ExportDone {
+                conn_id: id,
+                result,
+            });
+        });
+    }
+}
+
+/// The background part of the export: fetch all matching rows, render and
+/// write the file.
+#[allow(clippy::too_many_arguments)]
+fn run_export_job(
+    session: &mff_core::Session,
+    db: &str,
+    table: &str,
+    schema: Option<&mff_core::Table>,
+    dlg: &ExportDlg,
+    where_clause: &str,
+    order_by: &Option<(String, bool)>,
+    apply: bool,
+) -> std::result::Result<usize, String> {
+    // All matching rows (not just the current page) when a filter applies;
+    // otherwise the full table.
+    let (where_opt, order_opt) = if apply {
+        (
+            Some(where_clause.trim()).filter(|w| !w.is_empty()),
+            order_by.as_ref().map(|(c, a)| (c.as_str(), *a)),
+        )
+    } else {
+        (None, None)
+    };
+    let total = session
+        .count_rows(db, table, where_opt)
+        .unwrap_or(0)
+        .max(1);
+    let grid = session
+        .table_rows(db, table, where_opt, order_opt, 0, total)
+        .map_err(|e| e.to_string())?;
+    if grid.row_count() == 0 {
+        return Err("no rows match the scope".into());
+    }
+    let opts = mff_core::export::ExportOptions {
+        format: dlg.format,
+        delimiter: dlg.delimiter,
+        null_text: dlg.null_text.clone(),
+        batch_size: dlg.batch_size,
+        include_create: dlg.include_create,
+        include_column_list: true,
+        include_header: true,
+    };
+    let text = mff_core::export::export_to_string(&grid, schema, &opts)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&dlg.path, text).map_err(|e| e.to_string())?;
+    Ok(grid.row_count())
 }
 
 fn save_connection(reg: &mut mff_core::Registry, conn: Connection) -> Result<(), mff_core::MffError> {
@@ -442,35 +589,4 @@ impl App {
             self.load_schema(conn_id, table);
         }
     }
-}
-
-fn run_export(
-    app: &mut App,
-    conn_id: &str,
-    dlg: &ExportDlg,
-) -> std::result::Result<usize, String> {
-    let Some(state) = app.sessions.get(conn_id) else {
-        return Err("no session".into());
-    };
-    let Some(grid) = &state.data.grid else {
-        return Err("no data loaded".into());
-    };
-    let schema = if dlg.format == ExportFormat::Sql && dlg.include_create {
-        state.structure.schema.as_ref()
-    } else {
-        None
-    };
-    let opts = mff_core::export::ExportOptions {
-        format: dlg.format,
-        delimiter: dlg.delimiter,
-        null_text: dlg.null_text.clone(),
-        batch_size: dlg.batch_size,
-        include_create: dlg.include_create,
-        include_column_list: true,
-        include_header: true,
-    };
-    let text =
-        mff_core::export::export_to_string(grid, schema, &opts).map_err(|e| e.to_string())?;
-    std::fs::write(&dlg.path, text).map_err(|e| e.to_string())?;
-    Ok(grid.row_count())
 }

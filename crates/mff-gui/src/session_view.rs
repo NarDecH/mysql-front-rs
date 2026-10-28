@@ -25,6 +25,7 @@ pub struct SessionState {
     pub queries: Vec<QueryTab>,
     pub active_query: usize,
     pub info: InfoState,
+    pub server: ServerState,
     pub tree_filter: String,
     pub busy: usize,
     pub error: Option<String>,
@@ -32,6 +33,12 @@ pub struct SessionState {
     pub tree_selected: Option<(ObjKind, String)>,
     /// Active inline rename, if any.
     pub tree_rename: Option<TreeRename>,
+    /// Pending "drop object?" confirmation.
+    pub confirm_drop: Option<(ObjKind, String)>,
+    /// Executed query texts, most recent first (mirrored into App::app_state).
+    pub history: Vec<String>,
+    /// Whether the query-history panel is visible.
+    pub history_open: bool,
 }
 
 /// Kind of object selected in the tree (drives the highlight).
@@ -50,6 +57,17 @@ pub enum ActiveView {
     Structure,
     Query,
     Info,
+    Server,
+}
+
+/// An in-progress inline cell edit in the data grid.
+#[derive(Debug, Clone)]
+pub struct CellEdit {
+    /// Row index into `grid.rows`.
+    pub row: usize,
+    /// Column index into `grid.columns`.
+    pub col: usize,
+    pub just_started: bool,
 }
 
 pub struct DataState {
@@ -65,6 +83,22 @@ pub struct DataState {
     pub loading: bool,
     pub error: Option<String>,
     pub export_open: bool,
+    /// Primary-key columns of the browsed table (empty → no editing).
+    pub pk_cols: Vec<String>,
+    /// The cell currently being edited inline, if any.
+    pub editing: Option<CellEdit>,
+    /// Buffer of the in-progress cell edit.
+    pub edit_value: String,
+    /// Client-side "find in data" text (empty → all rows shown).
+    pub find: String,
+    /// Row awaiting delete confirmation.
+    pub confirm_delete_row: Option<usize>,
+    /// Cell shown in the value viewer window (row, col).
+    pub cell_view: Option<(usize, usize)>,
+    /// The "insert row" dialog, if open.
+    pub insert_dlg: Option<crate::insert_row::InsertRowDialog>,
+    /// Set while the schema for the insert dialog is still loading.
+    pub insert_pending: bool,
 }
 
 impl Default for DataState {
@@ -82,6 +116,14 @@ impl Default for DataState {
             loading: false,
             error: None,
             export_open: false,
+            pk_cols: Vec::new(),
+            editing: None,
+            edit_value: String::new(),
+            find: String::new(),
+            confirm_delete_row: None,
+            cell_view: None,
+            insert_dlg: None,
+            insert_pending: false,
         }
     }
 }
@@ -132,6 +174,40 @@ pub struct InfoState {
     pub loading: bool,
 }
 
+/// "Server" tab state: process list and user accounts.
+#[derive(Default)]
+pub struct ServerState {
+    pub processes: Option<Grid>,
+    pub processes_loading: bool,
+    pub users: Option<Grid>,
+    pub users_loading: bool,
+    pub new_user: Option<NewUserDialog>,
+    pub confirm_kill: Option<u64>,
+    pub confirm_drop_user: Option<(String, String)>,
+    pub error: Option<String>,
+}
+
+/// CREATE USER dialog state.
+pub struct NewUserDialog {
+    pub user: String,
+    pub host: String,
+    pub password: String,
+    pub error: Option<String>,
+    pub running: bool,
+}
+
+impl Default for NewUserDialog {
+    fn default() -> Self {
+        Self {
+            user: String::new(),
+            host: "%".into(),
+            password: String::new(),
+            error: None,
+            running: false,
+        }
+    }
+}
+
 /// Inline rename state for one tree entry (Explorer-style).
 #[derive(Debug, Clone)]
 pub struct TreeRename {
@@ -164,11 +240,15 @@ impl SessionState {
             queries: vec![QueryTab::new("Query 1".into())],
             active_query: 0,
             info: Default::default(),
+            server: Default::default(),
             tree_filter: String::new(),
             busy: 0,
             error: None,
             tree_selected: None,
             tree_rename: None,
+            confirm_drop: None,
+            history: Vec::new(),
+            history_open: false,
         }
     }
 }
@@ -191,6 +271,7 @@ impl App {
             self.active_conn = None;
         }
         self.status = "disconnected".into();
+        self.persist_state();
     }
 
     /// Load the database list for a session (background job).
@@ -244,6 +325,7 @@ impl App {
         std::thread::spawn(move || {
             let filter_opt = Some(filter.as_str()).filter(|f| !f.is_empty());
             let sort_ref = sort.as_ref().map(|(c, a)| (c.as_str(), *a));
+            let pk = session.primary_key_cols(&db, &table).unwrap_or_default();
             let rows = session.table_rows(
                 &db,
                 &table,
@@ -256,7 +338,7 @@ impl App {
                 .count_rows(&db, &table, Some(filter.as_str()).filter(|f| !f.is_empty()))
                 .unwrap_or(0);
             let result = match rows {
-                Ok(grid) => Ok((grid, total)),
+                Ok(grid) => Ok((grid, total, pk)),
                 Err(e) => Err(e.to_string()),
             };
             let _ = tx.send(UiMsg::DataLoaded {
@@ -304,6 +386,12 @@ impl App {
             return;
         }
         tab.running = true;
+        // Remember the query in the history (most recent first).
+        if !code.trim().is_empty() {
+            self.app_state.push_history(conn_id, &code);
+            state.history = self.app_state.conn(conn_id).history;
+            self.app_state.save_default();
+        }
         let session = state.session.clone();
         let tx = self.jobs.sender();
         let id = conn_id.to_string();
@@ -435,6 +523,184 @@ impl App {
                     self.load_objects(&conn_id, target_db);
                 }
             }
+            UiMsg::DataEdited { conn_id, result } => {
+                let mut reload: Option<String> = None;
+                {
+                    let Some(state) = self.sessions.get_mut(&conn_id) else {
+                        return;
+                    };
+                    state.busy = state.busy.saturating_sub(1);
+                    match result {
+                        Ok(()) => {
+                            let table = state.data.table.clone();
+                            reload = Some(table);
+                            self.status = "row updated".into();
+                        }
+                        Err(e) => {
+                            self.status = format!("update failed: {e}");
+                            state.data.error = Some(e);
+                        }
+                    }
+                }
+                if let Some(table) = reload {
+                    reopen_data_current(self, &conn_id, table);
+                }
+            }
+            UiMsg::RowInserted { conn_id, result } => {
+                let mut reload: Option<String> = None;
+                {
+                    let Some(state) = self.sessions.get_mut(&conn_id) else {
+                        return;
+                    };
+                    state.busy = state.busy.saturating_sub(1);
+                    match result {
+                        Ok(()) => {
+                            state.data.insert_dlg = None;
+                            reload = Some(state.data.table.clone());
+                            self.status = "row inserted".into();
+                        }
+                        Err(e) => {
+                            if let Some(d) = state.data.insert_dlg.as_mut() {
+                                d.error = Some(e.clone());
+                                d.running = false;
+                            }
+                            self.status = format!("insert failed: {e}");
+                        }
+                    }
+                }
+                if let Some(table) = reload {
+                    reopen_data_current(self, &conn_id, table);
+                }
+            }
+            UiMsg::Dropped {
+                conn_id,
+                obj,
+                result,
+            } => {
+                let Some(state) = self.sessions.get_mut(&conn_id) else {
+                    return;
+                };
+                state.busy = state.busy.saturating_sub(1);
+                match result {
+                    Ok(()) => {
+                        // Forget the dropped object everywhere it may appear.
+                        if state.data.table == obj {
+                            state.data = Default::default();
+                            if state.view == ActiveView::Data {
+                                state.view = ActiveView::Query;
+                            }
+                        }
+                        if state.structure.table == obj {
+                            state.structure = Default::default();
+                        }
+                        if state
+                            .tree_selected
+                            .as_ref()
+                            .map(|(_, n)| *n == obj)
+                            .unwrap_or(false)
+                        {
+                            state.tree_selected = None;
+                        }
+                        self.status = format!("dropped {obj}");
+                        let db = state.current_db.clone();
+                        drop(state);
+                        self.load_objects(&conn_id, db);
+                    }
+                    Err(e) => {
+                        state.error = Some(format!("drop failed: {e}"));
+                        self.status = format!("drop failed: {e}");
+                    }
+                }
+            }
+            UiMsg::ExportDone { conn_id, result } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                }
+                let msg = match &result {
+                    Ok(n) => format!("✓ exported {n} row(s)"),
+                    Err(e) => format!("✗ {e}"),
+                };
+                if let Some(dlg) = self.export_dlg.as_mut() {
+                    dlg.running = false;
+                    dlg.message = Some(match &result {
+                        Ok(n) => format!("✓ exported {n} row(s) to {}", dlg.path),
+                        Err(e) => format!("✗ {e}"),
+                    });
+                }
+                self.status = msg;
+            }
+            UiMsg::ProcessListLoaded { conn_id, result } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                    state.server.processes_loading = false;
+                    match result {
+                        Ok(grid) => state.server.processes = Some(grid),
+                        Err(e) => state.server.error = Some(format!("process list: {e}")),
+                    }
+                }
+            }
+            UiMsg::Killed {
+                conn_id,
+                id,
+                result,
+            } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                    state.server.confirm_kill = None;
+                    match result {
+                        Ok(()) => {
+                            self.status = format!("killed connection {id}");
+                            let s = state.session.clone();
+                            drop(state);
+                            self.load_process_list(&conn_id, s);
+                        }
+                        Err(e) => {
+                            state.server.error = Some(format!("kill {id}: {e}"));
+                            self.status = format!("kill {id} failed: {e}");
+                        }
+                    }
+                }
+            }
+            UiMsg::UserListLoaded { conn_id, result } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                    state.server.users_loading = false;
+                    match result {
+                        Ok(grid) => state.server.users = Some(grid),
+                        Err(e) => state.server.error = Some(format!("user list: {e}")),
+                    }
+                }
+            }
+            UiMsg::UserDone { conn_id, result } => {
+                let mut refresh = false;
+                {
+                    let Some(state) = self.sessions.get_mut(&conn_id) else {
+                        return;
+                    };
+                    state.busy = state.busy.saturating_sub(1);
+                    match result {
+                        Ok(msg) => {
+                            self.status = msg;
+                            refresh = true;
+                        }
+                        Err(e) => {
+                            self.status = format!("user management failed: {e}");
+                            if let Some(d) = state.server.new_user.as_mut() {
+                                d.error = Some(e);
+                                d.running = false;
+                            }
+                        }
+                    }
+                    state.server.confirm_drop_user = None;
+                }
+                if refresh {
+                    let Some(state) = self.sessions.get(&conn_id) else {
+                        return;
+                    };
+                    let s = state.session.clone();
+                    self.load_user_list(&conn_id, s);
+                }
+            }
             UiMsg::Status(s) => self.status = s,
             UiMsg::Connected { conn_id, result } => match result {
                 Ok(session) => {
@@ -450,7 +716,13 @@ impl App {
                         .and_then(|c| c.database.clone())
                         .unwrap_or_default();
                     self.status = format!("connected to {conn_name}");
-                    let state = SessionState::new(session, conn_name, version, current_db);
+                    let mut state = SessionState::new(session, conn_name, version, current_db);
+                    // Restore the saved query history for this connection.
+                    state.history = self.app_state.conn(&conn_id).history;
+                    // Fall back to the database that was open last time.
+                    if state.current_db.is_empty() {
+                        state.current_db = self.app_state.conn(&conn_id).db.unwrap_or_default();
+                    }
                     self.sessions.insert(conn_id.clone(), state);
                     self.active_conn = Some(conn_id.clone());
                     self.load_databases(&conn_id);
@@ -466,6 +738,19 @@ impl App {
                     match result {
                         Ok(dbs) => {
                             state.databases = dbs;
+                            // The database from the last session wins over
+                            // the connection's configured default; a system
+                            // database is only used as the final fallback.
+                            let saved = self.app_state.conn(&conn_id).db;
+                            if let Some(saved) =
+                                saved.filter(|d| !d.is_empty() && state.databases.contains(d))
+                            {
+                                if state.current_db != saved {
+                                    let session = state.session.clone();
+                                    let _ = session.use_database(&saved);
+                                }
+                                state.current_db = saved;
+                            }
                             if state.current_db.is_empty() {
                                 // Prefer a database the user can actually see.
                                 state.current_db = state
@@ -518,9 +803,12 @@ impl App {
                     if state.data.table == table {
                         state.data.loading = false;
                         match result {
-                            Ok((grid, total)) => {
+                            Ok((grid, total, pk)) => {
                                 state.data.grid = Some(grid);
                                 state.data.total = Some(total);
+                                state.data.pk_cols = pk;
+                                state.data.editing = None;
+                                state.data.edit_value.clear();
                             }
                             Err(e) => state.data.error = Some(e),
                         }
@@ -537,8 +825,22 @@ impl App {
                     if state.structure.table == table {
                         state.structure.loading = false;
                         match result {
-                            Ok(schema) => state.structure.schema = Some(schema),
-                            Err(e) => state.structure.error = Some(e),
+                            Ok(schema) => {
+                                // The insert-row dialog may be waiting for it.
+                                if state.data.insert_pending && state.data.table == table {
+                                    state.data.insert_pending = false;
+                                    state.data.insert_dlg = Some(
+                                        crate::insert_row::InsertRowDialog::from_schema(
+                                            &table, &schema,
+                                        ),
+                                    );
+                                }
+                                state.structure.schema = Some(schema);
+                            }
+                            Err(e) => {
+                                state.structure.error = Some(e);
+                                state.data.insert_pending = false;
+                            }
                         }
                     }
                 }
@@ -675,16 +977,25 @@ impl App {
                         }
                     });
                 if db != before {
+                    let session = self
+                        .sessions
+                        .get(&conn_id)
+                        .map(|s| s.session.clone());
                     if let Some(state) = self.sessions.get_mut(&conn_id) {
                         state.current_db = db.clone();
                         state.objects = None;
+                    }
+                    self.persist_state();
+                    // Make unqualified queries resolve against the new db.
+                    if let (Some(session), false) = (session, db.is_empty()) {
+                        let _ = session.use_database(&db);
                     }
                     if !db.is_empty() {
                         self.load_objects(&conn_id, db);
                     }
                 }
 
-                ui.menu_button("⋯", |ui| {
+                ui.menu_button("Menu ▾", |ui| {
                     if ui.button("Rename database…").clicked() {
                         ui.close();
                         open_db_rename = Some(current_db.clone());
@@ -692,6 +1003,12 @@ impl App {
                     if ui.button("Transfer data…").clicked() {
                         ui.close();
                         open_transfer = true;
+                    }
+                    if ui.button("Processes & users").clicked() {
+                        ui.close();
+                        if let Some(state) = self.sessions.get_mut(&conn_id) {
+                            state.view = ActiveView::Server;
+                        }
                     }
                 });
                 if ui.button("⟳ Refresh").clicked() {
@@ -842,6 +1159,11 @@ impl App {
                                     ui.close();
                                     export_table = Some(t.name.clone());
                                 }
+                                ui.separator();
+                                if ui.button(egui::RichText::new("Drop…").color(egui::Color32::LIGHT_RED)).clicked() {
+                                    ui.close();
+                                    actions.push(TreeAction::Drop(ObjKind::Table, t.name.clone()));
+                                }
                             });
                         }
                     });
@@ -878,6 +1200,31 @@ impl App {
                             if resp.clicked() || resp.double_clicked() {
                                 actions.push(TreeAction::Open(ObjKind::View, v.name.clone()));
                             }
+                            resp.context_menu(|ui| {
+                                if ui.button("Open definition").clicked() {
+                                    ui.close();
+                                    actions.push(TreeAction::ShowDef(
+                                        ObjKind::View,
+                                        v.name.clone(),
+                                        format!(
+                                            "SHOW CREATE VIEW {}",
+                                            mff_core::sqlgen::quote_qualified(&[&current_db, &v.name])
+                                        ),
+                                    ));
+                                }
+                                if ui.button("Rename").clicked() {
+                                    ui.close();
+                                    actions.push(TreeAction::StartRename(
+                                        ObjKind::View,
+                                        v.name.clone(),
+                                    ));
+                                }
+                                ui.separator();
+                                if ui.button(egui::RichText::new("Drop…").color(egui::Color32::LIGHT_RED)).clicked() {
+                                    ui.close();
+                                    actions.push(TreeAction::Drop(ObjKind::View, v.name.clone()));
+                                }
+                            });
                         }
                     });
                     views_group
@@ -918,6 +1265,31 @@ impl App {
                                     sql,
                                 ));
                             }
+                            resp.context_menu(|ui| {
+                                if ui.button("Open definition").clicked() {
+                                    ui.close();
+                                    let kw = if r.kind.eq_ignore_ascii_case("FUNCTION") {
+                                        "FUNCTION"
+                                    } else {
+                                        "PROCEDURE"
+                                    };
+                                    let sql = format!(
+                                        "SHOW CREATE {} {}",
+                                        kw,
+                                        mff_core::sqlgen::quote_qualified(&[&current_db, &r.name])
+                                    );
+                                    actions.push(TreeAction::ShowDef(
+                                        ObjKind::Routine,
+                                        r.name.clone(),
+                                        sql,
+                                    ));
+                                }
+                                ui.separator();
+                                if ui.button(egui::RichText::new("Drop…").color(egui::Color32::LIGHT_RED)).clicked() {
+                                    ui.close();
+                                    actions.push(TreeAction::Drop(ObjKind::Routine, r.name.clone()));
+                                }
+                            });
                         }
                     });
                     routines_group
@@ -956,6 +1328,25 @@ impl App {
                                     sql,
                                 ));
                             }
+                            resp.context_menu(|ui| {
+                                if ui.button("Open definition").clicked() {
+                                    ui.close();
+                                    let sql = format!(
+                                        "SHOW CREATE TRIGGER {}",
+                                        mff_core::sqlgen::quote_qualified(&[&current_db, &t.name])
+                                    );
+                                    actions.push(TreeAction::ShowDef(
+                                        ObjKind::Trigger,
+                                        t.name.clone(),
+                                        sql,
+                                    ));
+                                }
+                                ui.separator();
+                                if ui.button(egui::RichText::new("Drop…").color(egui::Color32::LIGHT_RED)).clicked() {
+                                    ui.close();
+                                    actions.push(TreeAction::Drop(ObjKind::Trigger, t.name.clone()));
+                                }
+                            });
                         }
                     });
                     triggers_group
@@ -990,6 +1381,25 @@ impl App {
                                     sql,
                                 ));
                             }
+                            resp.context_menu(|ui| {
+                                if ui.button("Open definition").clicked() {
+                                    ui.close();
+                                    let sql = format!(
+                                        "SHOW CREATE EVENT {}",
+                                        mff_core::sqlgen::quote_qualified(&[&current_db, &e.name])
+                                    );
+                                    actions.push(TreeAction::ShowDef(
+                                        ObjKind::Event,
+                                        e.name.clone(),
+                                        sql,
+                                    ));
+                                }
+                                ui.separator();
+                                if ui.button(egui::RichText::new("Drop…").color(egui::Color32::LIGHT_RED)).clicked() {
+                                    ui.close();
+                                    actions.push(TreeAction::Drop(ObjKind::Event, e.name.clone()));
+                                }
+                            });
                         }
                     });
                     events_group
@@ -1006,11 +1416,6 @@ impl App {
         // Deferred tree actions.
         for action in actions {
             match action {
-                TreeAction::Select(kind, name) => {
-                    if let Some(state) = self.sessions.get_mut(&conn_id) {
-                        state.tree_selected = Some((kind, name));
-                    }
-                }
                 TreeAction::Open(kind, name) => {
                     if let Some(state) = self.sessions.get_mut(&conn_id) {
                         state.tree_selected = Some((kind, name.clone()));
@@ -1076,6 +1481,11 @@ impl App {
                 TreeAction::RenameCommit(is_view, old, new) => {
                     commit_rename(self, &conn_id, is_view, old, new);
                 }
+                TreeAction::Drop(kind, name) => {
+                    if let Some(state) = self.sessions.get_mut(&conn_id) {
+                        state.confirm_drop = Some((kind, name));
+                    }
+                }
             }
         }
 
@@ -1103,6 +1513,7 @@ impl App {
                 tab_button(ui, "Structure", ActiveView::Structure, view, &conn_id, self);
                 tab_button(ui, "Query", ActiveView::Query, view, &conn_id, self);
                 tab_button(ui, "Info", ActiveView::Info, view, &conn_id, self);
+                tab_button(ui, "Server", ActiveView::Server, view, &conn_id, self);
                 if busy > 0 {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spinner();
@@ -1118,8 +1529,61 @@ impl App {
                 ActiveView::Structure => self.show_structure_view(ui, ctx, &conn_id),
                 ActiveView::Query => self.show_query_view(ui, ctx, &conn_id),
                 ActiveView::Info => self.show_info_view(ui, &conn_id),
+                ActiveView::Server => self.show_server_view(ui, ctx, &conn_id),
             }
         });
+
+        // "Drop object?" confirmation window.
+        let confirm_drop = self
+            .sessions
+            .get(&conn_id)
+            .and_then(|s| s.confirm_drop.clone());
+        if let Some((kind, name)) = confirm_drop {
+            let mut open = true;
+            let mut confirmed = false;
+            let what = match kind {
+                ObjKind::Table => "table",
+                ObjKind::View => "view",
+                ObjKind::Routine => "routine",
+                ObjKind::Trigger => "trigger",
+                ObjKind::Event => "event",
+            };
+            egui::Window::new(format!("Drop {what}"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Permanently drop {what} “{name}” of database “{current_db}”?"
+                    ));
+                    ui.weak("This cannot be undone.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("Drop {what}"))
+                                    .color(egui::Color32::LIGHT_RED),
+                            )
+                            .clicked()
+                        {
+                            confirmed = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            if let Some(state) = self.sessions.get_mut(&conn_id) {
+                                state.confirm_drop = None;
+                            }
+                        }
+                    });
+                });
+            if !open {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.confirm_drop = None;
+                }
+            }
+            if confirmed {
+                self.drop_object(&conn_id, kind, name);
+            }
+        }
     }
 }
 
@@ -1190,6 +1654,17 @@ pub fn reopen_data(
     app.load_data(conn_id, table);
 }
 
+/// Reload the data view of `table` with the filter/sort/offset it has now
+/// (used after edits, inserts and deletes).
+pub fn reopen_data_current(app: &mut App, conn_id: &str, table: String) {
+    let (filter, sort) = app
+        .sessions
+        .get(conn_id)
+        .map(|s| (s.data.filter_applied.clone(), s.data.sort.clone()))
+        .unwrap_or_default();
+    reopen_data(app, conn_id, table, filter, sort);
+}
+
 /// Open the structure view of a table.
 pub fn open_structure(app: &mut App, conn_id: &str, table: String) {
     {
@@ -1203,7 +1678,6 @@ pub fn open_structure(app: &mut App, conn_id: &str, table: String) {
 
 /// Deferred interactions collected while rendering the object browser.
 enum TreeAction {
-    Select(ObjKind, String),
     Open(ObjKind, String),
     ShowDef(ObjKind, String, String),
     NewObject(crate::new_dialog::NewKind),
@@ -1212,6 +1686,7 @@ enum TreeAction {
     RenameCommit(bool, String, String),
     RenameCancel,
     RenameFocusTaken,
+    Drop(ObjKind, String),
 }
 
 /// Inline rename editor for one tree entry (Explorer-style). Emits
@@ -1250,8 +1725,7 @@ fn render_rename_edit(
 }
 
 /// Validate and run `RENAME TABLE` for an inline rename.
-fn commit_rename(app: &mut App, conn_id: &str, is_view: bool, old: String, new: String) {
-    let new = new.trim().to_string();
+fn commit_rename(app: &mut App, conn_id: &str, is_view: bool, old: String, new: String) {    let new = new.trim().to_string();
     let Some(state) = app.sessions.get_mut(conn_id) else {
         return;
     };
@@ -1289,4 +1763,55 @@ fn commit_rename(app: &mut App, conn_id: &str, is_view: bool, old: String, new: 
             result,
         });
     });
+}
+
+impl App {
+    /// Ask the server to drop one object (background job). Routine kinds
+    /// (PROCEDURE vs FUNCTION) are resolved from the object list.
+    pub fn drop_object(&mut self, conn_id: &str, kind: ObjKind, name: String) {
+        let Some(state) = self.sessions.get_mut(conn_id) else {
+            return;
+        };
+        state.confirm_drop = None;
+        let session = state.session.clone();
+        let db = state.current_db.clone();
+        let routine_kind = match kind {
+            ObjKind::Routine => state
+                .objects
+                .as_ref()
+                .and_then(|o| o.routines.iter().find(|r| r.name == name))
+                .map(|r| {
+                    if r.kind.eq_ignore_ascii_case("FUNCTION") {
+                        "FUNCTION"
+                    } else {
+                        "PROCEDURE"
+                    }
+                })
+                .unwrap_or("PROCEDURE")
+                .to_string(),
+            _ => String::new(),
+        };
+        let tx = self.jobs.sender();
+        let id = conn_id.to_string();
+        state.busy += 1;
+        std::thread::spawn(move || {
+            let q = mff_core::sqlgen::quote_qualified(&[&db, &name]);
+            let sql = match kind {
+                ObjKind::Table => format!("DROP TABLE {q}"),
+                ObjKind::View => format!("DROP VIEW {q}"),
+                ObjKind::Trigger => format!("DROP TRIGGER {q}"),
+                ObjKind::Event => format!("DROP EVENT {q}"),
+                ObjKind::Routine => format!("DROP {routine_kind} {q}"),
+            };
+            let result = session
+                .run_statement(&sql)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(UiMsg::Dropped {
+                conn_id: id,
+                obj: name,
+                result,
+            });
+        });
+    }
 }

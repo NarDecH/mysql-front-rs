@@ -37,7 +37,7 @@ pub enum UiMsg {
     DataLoaded {
         conn_id: String,
         table: String,
-        result: std::result::Result<(Grid, u64), String>,
+        result: std::result::Result<(Grid, u64, Vec<String>), String>,
     },
     SchemaLoaded {
         conn_id: String,
@@ -77,6 +77,45 @@ pub enum UiMsg {
         ok: bool,
         target_same_server: bool,
         target_db: String,
+    },
+    /// An UPDATE/DELETE issued from the data grid finished.
+    DataEdited {
+        conn_id: String,
+        result: std::result::Result<(), String>,
+    },
+    /// An INSERT from the "new row" dialog finished.
+    RowInserted {
+        conn_id: String,
+        result: std::result::Result<(), String>,
+    },
+    /// A DROP TABLE/VIEW/… from the object browser finished.
+    Dropped {
+        conn_id: String,
+        obj: String,
+        result: std::result::Result<(), String>,
+    },
+    /// The data-view export (background) finished.
+    ExportDone {
+        conn_id: String,
+        result: std::result::Result<usize, String>,
+    },
+    ProcessListLoaded {
+        conn_id: String,
+        result: std::result::Result<Grid, String>,
+    },
+    Killed {
+        conn_id: String,
+        id: u64,
+        result: std::result::Result<(), String>,
+    },
+    UserListLoaded {
+        conn_id: String,
+        result: std::result::Result<Grid, String>,
+    },
+    /// CREATE USER / DROP USER finished (message describes the action).
+    UserDone {
+        conn_id: String,
+        result: std::result::Result<String, String>,
     },
     Status(String),
 }

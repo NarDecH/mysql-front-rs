@@ -19,18 +19,22 @@
 //! are thin layers on top of this library.
 
 pub mod account;
+pub mod appstate;
+pub mod edit;
 pub mod error;
 pub mod export;
 pub mod import;
 pub mod model;
 pub mod session;
 pub mod sqlgen;
+pub mod sqlfmt;
 pub mod sqlsplit;
 pub mod transfer;
 
 pub use account::{Connection, Registry, SslMode};
 pub use error::{MffError, Result};
 pub use export::ExportFormat;
+pub use appstate::AppState;
 pub use transfer::{TransferItem, TransferOptions, TransferSummary};
 pub use model::{Column, DatabaseObjects, ForeignKey, IndexKey, KeyKind, Table, TableBrief};
 pub use session::{Cell, ColMeta, ExecOutcome, Grid, ServerInfo, Session};

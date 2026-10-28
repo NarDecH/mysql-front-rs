@@ -77,6 +77,7 @@ impl App {
         let mut code;
         let mut run_clicked = false;
         let mut clear_clicked = false;
+        let mut format_clicked = false;
         let elapsed: Option<u128>;
         {
             let Some(state) = self.sessions.get_mut(conn_id) else {
@@ -100,8 +101,21 @@ impl App {
                 if run.clicked() {
                     run_clicked = true;
                 }
+                if ui
+                    .button("✨ Format")
+                    .on_hover_text("Reformat the SQL (uppercase keywords, one clause per line)")
+                    .clicked()
+                {
+                    format_clicked = true;
+                }
                 if ui.button("✕ Clear results").clicked() {
                     clear_clicked = true;
+                }
+                if ui
+                    .selectable_label(state.history_open, "🕘 History")
+                    .clicked()
+                {
+                    state.history_open = !state.history_open;
                 }
                 if let Some(ms) = tab.elapsed_ms {
                     ui.label(format!("last run: {ms} ms"));
@@ -125,6 +139,58 @@ impl App {
                 tab.code = edited;
             }
             code = tab.code.clone();
+        }
+        if format_clicked {
+            if let Some(state) = self.sessions.get_mut(conn_id) {
+                if let Some(tab) = state.queries.get_mut(active) {
+                    tab.code = mff_core::sqlfmt::format(&tab.code);
+                    code = tab.code.clone();
+                }
+            }
+        }
+
+        // ── History panel ──────────────────────────────────────────────
+        if self
+            .sessions
+            .get(conn_id)
+            .map(|s| s.history_open)
+            .unwrap_or(false)
+        {
+            let history = self.sessions.get(conn_id).map(|s| s.history.clone()).unwrap_or_default();
+            ui.separator();
+            ui.small(format!("query history ({} most recent)", history.len()));
+            egui::ScrollArea::vertical()
+                .max_height(120.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if history.is_empty() {
+                        ui.weak("no queries executed yet");
+                    }
+                    let mut picked: Option<String> = None;
+                    for (i, h) in history.iter().enumerate() {
+                        let preview = h
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(90)
+                            .collect::<String>();
+                        if ui
+                            .selectable_label(false, format!("{}. {}", i + 1, preview))
+                            .clicked()
+                        {
+                            picked = Some(h.clone());
+                        }
+                    }
+                    if let Some(sql) = picked {
+                        if let Some(state) = self.sessions.get_mut(conn_id) {
+                            if let Some(tab) = state.queries.get_mut(active) {
+                                tab.code = sql;
+                            }
+                        }
+                    }
+                });
+            ui.separator();
         }
 
         let ctrl_enter = ui.ctx().input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl);

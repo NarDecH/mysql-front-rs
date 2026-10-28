@@ -152,10 +152,14 @@ impl Session {
             .prefer_socket(false)
             .tcp_connect_timeout(Some(Duration::from_secs(c.timeout_secs.max(1))))
             .ssl_opts(ssl_opts(c.ssl_mode))
+            // One sticky connection: session state (`USE db`, `SET NAMES`,
+            // `SET FOREIGN_KEY_CHECKS`) must survive between statements,
+            // otherwise queries would run against the wrong database after
+            // the user switches it in the UI.
             .pool_opts(
-                mysql::PoolOpts::default().with_constraints(
-                    mysql::PoolConstraints::new(1, 8).unwrap_or_default(),
-                ),
+                mysql::PoolOpts::default()
+                    .with_constraints(mysql::PoolConstraints::new(1, 1).unwrap_or_default())
+                    .with_reset_connection(false),
             );
 
         let pool = Pool::new(builder)?;
@@ -610,6 +614,28 @@ impl Session {
         }
         let n: Option<u64> = conn.query_first(sql)?;
         Ok(n.unwrap_or(0))
+    }
+
+    /// The primary-key column names of a table, in key order (empty when
+    /// the table has no primary key).
+    pub fn primary_key_cols(&self, db: &str, table: &str) -> Result<Vec<String>> {
+        let mut conn = self.pool.get_conn()?;
+        let rows: Vec<String> = conn.exec(
+            "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' \
+             ORDER BY ORDINAL_POSITION",
+            (db, table),
+        )?;
+        Ok(rows)
+    }
+
+    /// Switch the session's default database (`USE …`). Safe to call from
+    /// a background job; subsequent unqualified statements resolve against
+    /// this database.
+    pub fn use_database(&self, db: &str) -> Result<()> {
+        let mut conn = self.pool.get_conn()?;
+        conn.query_drop(format!("USE {}", crate::sqlgen::quote_ident(db)))?;
+        Ok(())
     }
 
     /// `SHOW VARIABLES` as name/value pairs.

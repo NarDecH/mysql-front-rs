@@ -25,12 +25,20 @@ pub struct App {
     pub new_dlg: Option<crate::new_dialog::NewDialog>,
     pub db_rename_dlg: Option<crate::db_rename::DbRenameDialog>,
     pub transfer_dlg: Option<crate::transfer::TransferDialog>,
+    /// Persisted UI state (theme, last connection, query history, …).
+    pub app_state: mff_core::AppState,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let font_note = crate::fonts::install_fonts(&cc.egui_ctx)
             .map(|n| format!("Thai font loaded: {n}"));
+        let app_state = mff_core::AppState::load_default();
+        let theme = match app_state.theme.as_deref() {
+            Some("dark") => egui::Theme::Dark,
+            _ => egui::Theme::Light,
+        };
+        cc.egui_ctx.set_theme(theme);
         Self {
             registry: Registry::load_default(),
             sessions: HashMap::new(),
@@ -46,11 +54,33 @@ impl App {
             confirm_delete: None,
             connect_error: None,
             font_note,
-            theme: egui::Theme::Light,
+            theme,
             new_dlg: None,
             db_rename_dlg: None,
             transfer_dlg: None,
+            app_state,
         }
+    }
+
+    /// Persist the current UI state (theme, per-connection database and
+    /// query history). Cheap JSON write; called on the important changes
+    /// and on app close.
+    pub fn persist_state(&mut self) {
+        self.app_state.theme = Some(
+            match self.theme {
+                egui::Theme::Dark => "dark",
+                egui::Theme::Light => "light",
+            }
+            .to_string(),
+        );
+        self.app_state.last_conn = self.active_conn.clone();
+        for (id, state) in &self.sessions {
+            let mut st = self.app_state.conn(id);
+            st.db = Some(state.current_db.clone()).filter(|d| !d.is_empty());
+            st.history = state.history.clone();
+            self.app_state.set_conn(id, st);
+        }
+        self.app_state.save_default();
     }
 
     /// Switch between the light and dark theme.
@@ -60,6 +90,7 @@ impl App {
             egui::Theme::Light => egui::Theme::Dark,
         };
         ctx.set_theme(self.theme);
+        self.persist_state();
     }
 
     /// The theme toggle button (shows the theme you would switch to).
@@ -161,7 +192,12 @@ impl App {
                         body.rows(24.0, rows.len(), |mut row| {
                             let c = &rows[row.index()];
                             row.col(|ui| {
-                                ui.strong(&c.name);
+                                let is_last = self.app_state.last_conn.as_deref() == Some(&c.id);
+                                if is_last {
+                                    ui.strong(format!("{}  (last used)", c.name));
+                                } else {
+                                    ui.strong(&c.name);
+                                }
                             });
                                 row.col(|ui| {
                                     ui.label(c.host_port());
@@ -299,6 +335,11 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Save the UI state when the window is closed.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_state();
+    }
+
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.poll_jobs();
 

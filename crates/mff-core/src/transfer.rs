@@ -2,7 +2,6 @@
 //! and view definitions from a source database to a target database —
 //! possibly on a completely different server.
 
-use crate::error::Result;
 use crate::session::{Cell, Grid, Session};
 use crate::sqlgen;
 
@@ -103,7 +102,7 @@ pub fn transfer(
     };
 
     let q_target = |name: &str| sqlgen::quote_qualified(&[target_db, name]);
-    let q_source = |name: &str| sqlgen::quote_qualified(&[source_db, name]);
+    let _q_source = |name: &str| sqlgen::quote_qualified(&[source_db, name]);
 
     // 1. Target database (with the source charset) + session context.
     if opts.create_target_db {
