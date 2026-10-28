@@ -1584,6 +1584,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui_plot"
+version = "0.34.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67fc9b427a837264e55381a5cade6e28fe83ac5b165a61b9c888548c732a9c95"
+dependencies = [
+ "ahash",
+ "egui",
+ "emath",
+]
+
+[[package]]
 name = "elliptic-curve"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2295,7 +2306,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -2801,6 +2812,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_extras",
+ "egui_plot",
  "image",
  "mff-core",
  "rfd",

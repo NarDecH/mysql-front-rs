@@ -22,6 +22,7 @@ pub mod account;
 pub mod backup;
 pub mod appstate;
 pub mod designer;
+pub mod compare;
 pub mod edit;
 pub mod error;
 pub mod export;

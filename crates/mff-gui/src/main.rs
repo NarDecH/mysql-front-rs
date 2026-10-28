@@ -8,10 +8,13 @@
 mod app;
 mod backup_dlg;
 mod data_view;
+mod chart;
+mod compare_dlg;
 mod db_rename;
 mod dialogs;
 mod fonts;
 mod import_dlg;
+mod i18n;
 mod info_view;
 mod insert_row;
 mod jobs;

@@ -74,12 +74,16 @@ impl App {
         ui.separator();
 
         // ── Editor + toolbar (mutate only the tab) ─────────────────────
+        let lang = self.lang;
+        use crate::i18n::t;
+
         let active = self.sessions.get(conn_id).map(|s| s.active_query).unwrap_or(0);
         let mut code;
         let mut run_clicked = false;
         let mut clear_clicked = false;
         let mut format_clicked = false;
         let mut explain_clicked = false;
+        let mut chart_grid: Option<Grid> = None;
         let elapsed: Option<u128>;
         // Suggestion chosen via Enter/Tab (set before the editor renders).
         let mut key_accept = false;
@@ -121,7 +125,7 @@ impl App {
                 let run = ui.add_enabled(
                     !tab.running,
                     egui::Button::new(
-                        egui::RichText::new("▶ Run (Ctrl+Enter)")
+                        egui::RichText::new(t(lang, "▶ Run (Ctrl+Enter)"))
                             .strong()
                             .color(egui::Color32::WHITE),
                     )
@@ -132,14 +136,14 @@ impl App {
                     run_clicked = true;
                 }
                 if ui
-                    .button("✨ Format")
+                    .button(t(lang, "✨ Format"))
                     .on_hover_text("Reformat the SQL (uppercase keywords, one clause per line)")
                     .clicked()
                 {
                     format_clicked = true;
                 }
                 if ui
-                    .button("🔍 Explain")
+                    .button(t(lang, "🔍 Explain"))
                     .on_hover_text(
                         "Run EXPLAIN on every SELECT/INSERT/UPDATE/DELETE/REPLACE statement",
                     )
@@ -147,11 +151,11 @@ impl App {
                 {
                     explain_clicked = true;
                 }
-                if ui.button("✕ Clear results").clicked() {
+                if ui.button(t(lang, "✕ Clear results")).clicked() {
                     clear_clicked = true;
                 }
                 if ui
-                    .selectable_label(state.history_open, "🕘 History")
+                    .selectable_label(state.history_open, t(lang, "🕘 History"))
                     .clicked()
                 {
                     state.history_open = !state.history_open;
@@ -406,6 +410,13 @@ impl App {
                                 if ui.small_button("⭳ Export…").clicked() {
                                     export_grid_interactive(grid);
                                 }
+                                if ui
+                                    .small_button("📈 Chart…")
+                                    .on_hover_text("Plot a numeric column")
+                                    .clicked()
+                                {
+                                    chart_grid = Some(grid.clone());
+                                }
                             });
                             let mut sel = None;
                             render_grid(ui, grid, &mut sel, None);
@@ -441,6 +452,10 @@ impl App {
                     ui.small(format!("total: {ms} ms"));
                 }
             });
+        // The Chart button sets the flag while rendering results (above).
+        if let Some(grid) = chart_grid.take() {
+            self.open_chart(grid);
+        }
         let _ = ctx;
     }
 }

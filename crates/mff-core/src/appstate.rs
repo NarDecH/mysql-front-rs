@@ -24,6 +24,9 @@ pub struct AppState {
     /// "dark" or "light".
     #[serde(default)]
     pub theme: Option<String>,
+    /// UI language: "en" (default) or "th".
+    #[serde(default)]
+    pub language: Option<String>,
     /// Connection id of the last active session.
     #[serde(default)]
     pub last_conn: Option<String>,

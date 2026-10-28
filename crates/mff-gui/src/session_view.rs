@@ -939,6 +939,27 @@ impl App {
                     self.load_objects(&conn_id, db);
                 }
             }
+            UiMsg::CompareDone { conn_id, result } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                }
+                if let Some(dlg) = self.compare_dlg.as_mut() {
+                    dlg.running = false;
+                }
+                match result {
+                    Ok(report) => {
+                        self.status = report.summary();
+                        self.compare_report =
+                            Some(crate::compare_dlg::CompareReportUi { report });
+                    }
+                    Err(e) => {
+                        self.status = format!("compare failed: {e}");
+                        if let Some(dlg) = self.compare_dlg.as_mut() {
+                            dlg.message = Some(format!("✗ {e}"));
+                        }
+                    }
+                }
+            }
             UiMsg::Status(s) => self.status = s,
             UiMsg::Connected { conn_id, result } => match result {
                 Ok(session) => {
@@ -1227,12 +1248,15 @@ impl App {
             }
         }
 
+        let lang = self.lang;
+        use crate::i18n::t;
+
         // ── Top bar ────────────────────────────────────────────────────
         let mut open_transfer = false;
         let mut open_db_rename: Option<String> = None;
         egui::TopBottomPanel::top("session_top").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("⏻ Disconnect").clicked() {
+                if ui.button(t(lang, "⏻ Disconnect")).clicked() {
                     self.disconnect(&conn_id);
                     return;
                 }
@@ -1242,7 +1266,7 @@ impl App {
                     ui.label(format!("(server {version})"));
                 }
                 ui.separator();
-                ui.label("database:");
+                ui.label(t(lang, "database:"));
                 let dbs = self
                     .sessions
                     .get(&conn_id)
@@ -1284,32 +1308,36 @@ impl App {
                     }
                 }
 
-                ui.menu_button("Menu ▾", |ui| {
-                    if ui.button("Rename database…").clicked() {
+                ui.menu_button(t(lang, "Menu ▾"), |ui| {
+                    if ui.button(t(lang, "Rename database…")).clicked() {
                         ui.close();
                         open_db_rename = Some(current_db.clone());
                     }
-                    if ui.button("Transfer data…").clicked() {
+                    if ui.button(t(lang, "Transfer data…")).clicked() {
                         ui.close();
                         open_transfer = true;
                     }
-                    if ui.button("Processes & users").clicked() {
+                    if ui.button(t(lang, "Processes & users")).clicked() {
                         ui.close();
                         if let Some(state) = self.sessions.get_mut(&conn_id) {
                             state.view = ActiveView::Server;
                         }
                     }
                     ui.separator();
-                    if ui.button("Backup database…").clicked() {
+                    if ui.button(t(lang, "Backup database…")).clicked() {
                         ui.close();
                         self.backup_dlg = Some(Default::default());
                     }
-                    if ui.button("Restore database…").clicked() {
+                    if ui.button(t(lang, "Restore database…")).clicked() {
                         ui.close();
                         self.restore_dlg = Some(Default::default());
                     }
+                    if ui.button(t(lang, "Compare table with…")).clicked() {
+                        ui.close();
+                        self.open_compare_dialog(&conn_id);
+                    }
                 });
-                if ui.button("⟳ Refresh").clicked() {
+                if ui.button(t(lang, "⟳ Refresh")).clicked() {
                     self.load_databases(&conn_id);
                 }
             });
@@ -1807,11 +1835,11 @@ impl App {
                 ui.colored_label(egui::Color32::LIGHT_RED, format!("⚠ {err}"));
             }
             ui.horizontal(|ui| {
-                tab_button(ui, "Data", ActiveView::Data, view, &conn_id, self);
-                tab_button(ui, "Structure", ActiveView::Structure, view, &conn_id, self);
-                tab_button(ui, "Query", ActiveView::Query, view, &conn_id, self);
-                tab_button(ui, "Info", ActiveView::Info, view, &conn_id, self);
-                tab_button(ui, "Server", ActiveView::Server, view, &conn_id, self);
+                tab_button(ui, t(lang, "Data"), ActiveView::Data, view, &conn_id, self);
+                tab_button(ui, t(lang, "Structure"), ActiveView::Structure, view, &conn_id, self);
+                tab_button(ui, t(lang, "Query"), ActiveView::Query, view, &conn_id, self);
+                tab_button(ui, t(lang, "Info"), ActiveView::Info, view, &conn_id, self);
+                tab_button(ui, t(lang, "Server"), ActiveView::Server, view, &conn_id, self);
                 if busy > 0 {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spinner();

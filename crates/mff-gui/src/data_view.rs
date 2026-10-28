@@ -47,6 +47,9 @@ impl App {
         let export_open;
         let mut d_status: Option<String> = None;
 
+        let lang = self.lang;
+        use crate::i18n::t;
+
         {
             let Some(state) = self.sessions.get_mut(conn_id) else {
                 return;
@@ -72,21 +75,21 @@ impl App {
                 if d.loading {
                     ui.spinner();
                     ui.small("loading…");
-                } else if ui.button("⟳ Refresh").clicked() {
+                } else if ui.button(t(lang, "⟳ Refresh")).clicked() {
                     actions.push(DataAction::Reload {
                         table: d.table.clone(),
                         filter: d.filter_applied.clone(),
                         sort: d.sort.clone(),
                     });
                 }
-                if ui.button("⚒ Structure").clicked() {
+                if ui.button(t(lang, "⚒ Structure")).clicked() {
                     actions.push(DataAction::Structure(d.table.clone()));
                 }
-                if ui.button("⭳ Export…").clicked() {
+                if ui.button(t(lang, "⭳ Export…")).clicked() {
                     actions.push(DataAction::Export);
                 }
                 if ui
-                    .button("⇪ Import…")
+                    .button(t(lang, "⇪ Import…"))
                     .on_hover_text("Load a CSV / JSON / SQL file into a table")
                     .clicked()
                 {
@@ -94,14 +97,14 @@ impl App {
                 }
                 ui.separator();
                 if ui
-                    .button("＋ Row")
+                    .button(t(lang, "＋ Row"))
                     .on_hover_text("Insert a new row")
                     .clicked()
                 {
                     actions.push(DataAction::InsertRow);
                 }
                 if ui
-                    .button("⤢ View cell")
+                    .button(t(lang, "⤢ View cell"))
                     .on_hover_text("Show the selected cell's full value")
                     .clicked()
                 {
@@ -109,20 +112,20 @@ impl App {
                 }
             });
             ui.horizontal(|ui| {
-                ui.label("filter (WHERE):");
+                ui.label(t(lang, "filter (WHERE):"));
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut d.filter_input)
                         .hint_text("e.g. id > 100 AND name LIKE 'a%'")
                         .desired_width(300.0),
                 );
                 apply_filter |= resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                apply_filter |= ui.button("Apply").clicked();
-                if !d.filter_applied.is_empty() && ui.button("✕ Clear").clicked() {
+                apply_filter |= ui.button(t(lang, "Apply")).clicked();
+                if !d.filter_applied.is_empty() && ui.button(t(lang, "✕ Clear")).clicked() {
                     d.filter_input.clear();
                     apply_filter = true;
                 }
                 ui.separator();
-                ui.label("find:");
+                ui.label(t(lang, "find:"));
                 ui.add(
                     egui::TextEdit::singleline(&mut d.find)
                         .hint_text("search all columns…")
@@ -381,7 +384,7 @@ impl App {
                     });
                 }
                 ui.separator();
-                ui.label("page size:");
+                ui.label(t(lang, "page size:"));
                 egui::ComboBox::from_id_salt("page_size")
                     .selected_text(d.page_size.to_string())
                     .show_ui(ui, |ui| {
@@ -389,7 +392,7 @@ impl App {
                             ui.selectable_value(&mut d.page_size, s, s.to_string());
                         }
                     });
-                if ui.button("go").clicked() {
+                if ui.button(t(lang, "go")).clicked() {
                     d.offset = 0;
                     page_size_changed = true;
                 }

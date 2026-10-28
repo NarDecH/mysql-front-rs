@@ -29,8 +29,13 @@ pub struct App {
     pub backup_dlg: Option<crate::backup_dlg::BackupDlg>,
     pub restore_dlg: Option<crate::backup_dlg::RestoreDlg>,
     pub designer: Option<crate::table_designer::DesignerState>,
+    pub chart: Option<crate::chart::ChartDlg>,
+    pub compare_dlg: Option<crate::compare_dlg::CompareDlg>,
+    pub compare_report: Option<crate::compare_dlg::CompareReportUi>,
     /// Persisted UI state (theme, last connection, query history, …).
     pub app_state: mff_core::AppState,
+    /// UI language (persisted in app_state).
+    pub lang: crate::i18n::Lang,
 }
 
 impl App {
@@ -43,6 +48,10 @@ impl App {
             _ => egui::Theme::Light,
         };
         cc.egui_ctx.set_theme(theme);
+        let lang = match app_state.language.as_deref() {
+            Some("th") => crate::i18n::Lang::Th,
+            _ => crate::i18n::Lang::En,
+        };
         Self {
             registry: Registry::load_default(),
             sessions: HashMap::new(),
@@ -66,7 +75,11 @@ impl App {
             backup_dlg: None,
             restore_dlg: None,
             designer: None,
+            chart: None,
+            compare_dlg: None,
+            compare_report: None,
             app_state,
+            lang,
         }
     }
 
@@ -82,6 +95,13 @@ impl App {
             .to_string(),
         );
         self.app_state.last_conn = self.active_conn.clone();
+        self.app_state.language = Some(
+            match self.lang {
+                crate::i18n::Lang::En => "en",
+                crate::i18n::Lang::Th => "th",
+            }
+            .to_string(),
+        );
         for (id, state) in &self.sessions {
             let mut st = self.app_state.conn(id);
             st.db = Some(state.current_db.clone()).filter(|d| !d.is_empty());
@@ -114,6 +134,14 @@ impl App {
         {
             self.toggle_theme(ctx);
         }
+        if ui
+            .button(self.lang.toggle_label())
+            .on_hover_text("Switch UI language / เปลี่ยนภาษา")
+            .clicked()
+        {
+            self.lang = self.lang.other();
+            self.persist_state();
+        }
     }
 
     /// Drain worker messages and route them into the session states.
@@ -137,6 +165,9 @@ impl App {
 
     /// The connections home screen.
     fn show_connections_screen(&mut self, ctx: &Context) {
+        let lang = self.lang;
+        use crate::i18n::t;
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -146,7 +177,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
                     self.theme_button(ui, ctx);
-                    if ui.button("＋ New connection").clicked() {
+                    if ui.button(t(lang, "＋ New connection")).clicked() {
                         self.open_conn_editor(None);
                     }
                 });
@@ -190,9 +221,9 @@ impl App {
                     .columns(Column::initial(90.0).resizable(true), 1)
                     .columns(Column::auto(), 1)
                     .header(22.0, |mut h| {
-                        for t in ["Name", "Host:port", "User", "Database", "SSL", ""] {
+                        for lbl in [t(lang, "Name"), t(lang, "Host:port"), t(lang, "User"), t(lang, "Database"), "SSL", ""] {
                             h.col(|ui| {
-                                ui.strong(t);
+                                ui.strong(lbl);
                             });
                         }
                     })
@@ -224,16 +255,16 @@ impl App {
                                 });
                                 row.col(|ui| {
                                     ui.horizontal(|ui| {
-                                        if crate::theme::primary_button(ui, "Connect").clicked() {
+                                        if crate::theme::primary_button(ui, t(lang, "Connect")).clicked() {
                                             connect_id = Some(c.id.clone());
                                         }
-                                        if ui.small_button("Edit").clicked() {
+                                        if ui.small_button(t(lang, "Edit")).clicked() {
                                             edit_id = Some(c.id.clone());
                                         }
-                                        if ui.small_button("Duplicate").clicked() {
+                                        if ui.small_button(t(lang, "Duplicate")).clicked() {
                                             dup_id = Some(c.id.clone());
                                         }
-                                        if ui.small_button("Delete").clicked() {
+                                        if ui.small_button(t(lang, "Delete")).clicked() {
                                             del_id = Some(c.id.clone());
                                         }
                                     });
@@ -356,7 +387,7 @@ impl App {
                 }
                 ui.separator();
                 if ui
-                    .button("＋")
+                    .button(crate::i18n::t(self.lang, "＋"))
                     .on_hover_text("Open another connection")
                     .clicked()
                 {
@@ -379,14 +410,14 @@ impl App {
     fn show_session_top(&mut self, ctx: &Context, _conn_id: &str) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.small_button("⌂ Connections").clicked() {
+                if ui.small_button(crate::i18n::t(self.lang, "⌂ Connections")).clicked() {
                     self.active_conn = None;
                 }
                 self.theme_button(ui, ctx);
                 ui.separator();
                 // Copy button + Ctrl+C inside the data view.
                 if ui
-                    .small_button("⧉ Copy cell")
+                    .small_button(crate::i18n::t(self.lang, "⧉ Copy cell"))
                     .on_hover_text("Copy the selected cell (Ctrl+C)")
                     .clicked()
                 {
@@ -509,6 +540,25 @@ impl eframe::App for App {
                     self.designer = None;
                 }
             }
+        }
+
+        // Chart window.
+        if self.chart.is_some() {
+            self.show_chart_dialog(ctx);
+        }
+
+        // Compare dialog + report.
+        if self.compare_dlg.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_compare_dialog(ctx, &id);
+                } else {
+                    self.compare_dlg = None;
+                }
+            }
+        }
+        if self.compare_report.is_some() {
+            self.show_compare_report(ctx);
         }
 
         // Keep repainting while jobs are in flight so spinners move and

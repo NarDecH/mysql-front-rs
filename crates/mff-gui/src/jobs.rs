@@ -144,6 +144,11 @@ pub enum UiMsg {
         target: String,
         result: std::result::Result<usize, String>,
     },
+    /// A table data comparison finished.
+    CompareDone {
+        conn_id: String,
+        result: std::result::Result<mff_core::compare::CompareReport, String>,
+    },
     /// The table designer's ALTER statements finished.
     DesignApplied {
         conn_id: String,
