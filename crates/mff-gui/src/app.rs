@@ -25,6 +25,10 @@ pub struct App {
     pub new_dlg: Option<crate::new_dialog::NewDialog>,
     pub db_rename_dlg: Option<crate::db_rename::DbRenameDialog>,
     pub transfer_dlg: Option<crate::transfer::TransferDialog>,
+    pub import_dlg: Option<crate::import_dlg::ImportDlg>,
+    pub backup_dlg: Option<crate::backup_dlg::BackupDlg>,
+    pub restore_dlg: Option<crate::backup_dlg::RestoreDlg>,
+    pub designer: Option<crate::table_designer::DesignerState>,
     /// Persisted UI state (theme, last connection, query history, …).
     pub app_state: mff_core::AppState,
 }
@@ -58,6 +62,10 @@ impl App {
             new_dlg: None,
             db_rename_dlg: None,
             transfer_dlg: None,
+            import_dlg: None,
+            backup_dlg: None,
+            restore_dlg: None,
+            designer: None,
             app_state,
         }
     }
@@ -396,6 +404,50 @@ impl eframe::App for App {
                     self.show_transfer_dialog(ctx, &id);
                 } else {
                     self.transfer_dlg = None;
+                }
+            }
+        }
+
+        // "Import data" modal.
+        if self.import_dlg.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_import_dialog(ctx, &id);
+                } else {
+                    self.import_dlg = None;
+                }
+            }
+        }
+
+        // "Backup database" modal.
+        if self.backup_dlg.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_backup_dialog(ctx, &id);
+                } else {
+                    self.backup_dlg = None;
+                }
+            }
+        }
+
+        // "Restore database" modal.
+        if self.restore_dlg.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_restore_dialog(ctx, &id);
+                } else {
+                    self.restore_dlg = None;
+                }
+            }
+        }
+
+        // Table designer modal.
+        if self.designer.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_designer(ctx, &id);
+                } else {
+                    self.designer = None;
                 }
             }
         }

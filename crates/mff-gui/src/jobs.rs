@@ -123,6 +123,31 @@ pub enum UiMsg {
         db: String,
         result: std::result::Result<mff_core::suggest::CompletionIndex, String>,
     },
+    /// A data import finished (table = target table for a reload).
+    ImportDone {
+        conn_id: String,
+        table: String,
+        result: std::result::Result<usize, String>,
+    },
+    /// A database backup finished.
+    BackupDone {
+        conn_id: String,
+        path: String,
+        result: std::result::Result<(), String>,
+    },
+    /// A database restore finished.
+    RestoreDone {
+        conn_id: String,
+        target: String,
+        result: std::result::Result<usize, String>,
+    },
+    /// The table designer's ALTER statements finished.
+    DesignApplied {
+        conn_id: String,
+        old_name: String,
+        new_name: String,
+        result: std::result::Result<(), String>,
+    },
     Status(String),
 }
 

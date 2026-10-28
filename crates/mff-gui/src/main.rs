@@ -6,10 +6,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod backup_dlg;
 mod data_view;
 mod db_rename;
 mod dialogs;
 mod fonts;
+mod import_dlg;
 mod info_view;
 mod insert_row;
 mod jobs;
@@ -19,6 +21,7 @@ mod server_view;
 mod session_view;
 mod transfer;
 mod structure_view;
+mod table_designer;
 mod theme;
 
 /// Decode the embedded logo for the window / taskbar icon.

@@ -19,7 +19,9 @@
 //! are thin layers on top of this library.
 
 pub mod account;
+pub mod backup;
 pub mod appstate;
+pub mod designer;
 pub mod edit;
 pub mod error;
 pub mod export;

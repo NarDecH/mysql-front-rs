@@ -342,7 +342,7 @@ impl App {
             }
         }
         if (run_clicked || ctrl_enter) && !running {
-            self.run_query(conn_id, active, code);
+            self.run_query(conn_id, active, code, false);
         }
 
         // ── Results ────────────────────────────────────────────────────

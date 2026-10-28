@@ -550,6 +550,9 @@ impl Session {
             }
         }
 
+        // The pool is a single sticky connection: return it before
+        // `show_create` borrows it again, or the two would deadlock.
+        drop(conn);
         t.create_statement = Some(self.show_create(db, table)?);
         Ok(t)
     }
@@ -569,6 +572,24 @@ impl Session {
         }
         Err(MffError::Invalid(format!(
             "no CREATE statement returned for {db}.{name}"
+        )))
+    }
+
+    /// `SHOW CREATE VIEW` for one view.
+    pub fn show_create_view(&self, db: &str, name: &str) -> Result<String> {
+        let sql = format!(
+            "SHOW CREATE VIEW {}",
+            crate::sqlgen::quote_qualified(&[db, name])
+        );
+        let g = self.query(&sql)?;
+        if g.row_count() >= 1 && g.columns.len() >= 2 {
+            match &g.rows[0][1] {
+                Cell::Text(s) => return Ok(s.clone()),
+                _ => {}
+            }
+        }
+        Err(MffError::Invalid(format!(
+            "no CREATE statement returned for view {db}.{name}"
         )))
     }
 

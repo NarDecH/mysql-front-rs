@@ -24,6 +24,7 @@ enum DataAction {
     },
     Structure(String),
     Export,
+    Import,
     /// UPDATE one cell (`text` is the user-typed value; `NULL` → SQL NULL).
     ApplyEdit {
         row: usize,
@@ -76,6 +77,13 @@ impl App {
                 }
                 if ui.button("⭳ Export…").clicked() {
                     actions.push(DataAction::Export);
+                }
+                if ui
+                    .button("⇪ Import…")
+                    .on_hover_text("Load a CSV / JSON / SQL file into a table")
+                    .clicked()
+                {
+                    actions.push(DataAction::Import);
                 }
                 ui.separator();
                 if ui
@@ -350,6 +358,14 @@ impl App {
                     if let Some(s) = self.sessions.get_mut(conn_id) {
                         s.data.export_open = true;
                     }
+                }
+                DataAction::Import => {
+                    let table = self
+                        .sessions
+                        .get(conn_id)
+                        .map(|s| s.data.table.clone())
+                        .unwrap_or_default();
+                    self.open_import_dialog(conn_id, table);
                 }
                 DataAction::ApplyEdit { row, col, text } => {
                     self.apply_cell_edit(conn_id, row, col, &text);

@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$Cmd,
     [string]$Arg1,
-    [string]$Arg2
+    [string]$Arg2,
+    [string]$Arg3,
+    [string]$Arg4
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -90,6 +92,18 @@ switch ($Cmd) {
         [System.Windows.Forms.SendKeys]::SendWait($Arg1)
         Start-Sleep -Milliseconds 250
         Write-Output "typed"
+    }
+    "drag" {
+        Show-Window | Out-Null
+        [Win]::SetCursorPos([int]$Arg1, [int]$Arg2)
+        Start-Sleep -Milliseconds 150
+        [Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)  # left down
+        Start-Sleep -Milliseconds 150
+        [Win]::SetCursorPos([int]$Arg3, [int]$Arg4)
+        Start-Sleep -Milliseconds 250
+        [Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)  # left up
+        Start-Sleep -Milliseconds 250
+        Write-Output "dragged"
     }
     "key" {
         Show-Window | Out-Null

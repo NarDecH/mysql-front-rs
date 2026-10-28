@@ -13,6 +13,7 @@ impl App {
     pub fn show_structure_view(&mut self, ui: &mut egui::Ui, ctx: &Context, conn_id: &str) {
         let mut refresh_clicked = false;
         let mut browse_clicked = false;
+        let mut edit_clicked = false;
         let mut copy_clicked = false;
         let mut open_query_clicked = false;
         let create_stmt;
@@ -40,6 +41,13 @@ impl App {
                 }
                 if ui.button("▤ Browse data").clicked() {
                     browse_clicked = true;
+                }
+                if ui
+                    .button("✎ Edit structure")
+                    .on_hover_text("Open the table designer (ALTER)")
+                    .clicked()
+                {
+                    edit_clicked = true;
                 }
             });
             ui.add_space(6.0);
@@ -190,6 +198,9 @@ impl App {
                 .map(|s| s.structure.table.clone())
                 .unwrap_or_default();
             open_data(self, conn_id, table);
+        }
+        if edit_clicked {
+            self.open_designer(conn_id);
         }
         if copy_clicked {
             ctx.copy_text(create_stmt.clone());
