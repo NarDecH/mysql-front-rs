@@ -15,6 +15,7 @@ mod jobs;
 mod new_dialog;
 mod query_view;
 mod session_view;
+mod transfer;
 mod structure_view;
 mod theme;
 

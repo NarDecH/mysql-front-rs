@@ -26,10 +26,12 @@ pub mod model;
 pub mod session;
 pub mod sqlgen;
 pub mod sqlsplit;
+pub mod transfer;
 
 pub use account::{Connection, Registry, SslMode};
 pub use error::{MffError, Result};
 pub use export::ExportFormat;
+pub use transfer::{TransferItem, TransferOptions, TransferSummary};
 pub use model::{Column, DatabaseObjects, ForeignKey, IndexKey, KeyKind, Table, TableBrief};
 pub use session::{Cell, ColMeta, ExecOutcome, Grid, ServerInfo, Session};
 

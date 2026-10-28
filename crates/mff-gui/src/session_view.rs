@@ -415,6 +415,26 @@ impl App {
                     }
                 }
             }
+            UiMsg::TransferDone {
+                conn_id,
+                text,
+                ok,
+                target_same_server,
+                target_db,
+            } => {
+                let Some(state) = self.sessions.get_mut(&conn_id) else {
+                    return;
+                };
+                state.busy = state.busy.saturating_sub(1);
+                if let Some(d) = self.transfer_dlg.as_mut() {
+                    d.running = false;
+                    d.result = Some(text.clone());
+                }
+                self.status = text;
+                if ok && target_same_server && state.current_db == target_db {
+                    self.load_objects(&conn_id, target_db);
+                }
+            }
             UiMsg::Status(s) => self.status = s,
             UiMsg::Connected { conn_id, result } => match result {
                 Ok(session) => {
@@ -621,6 +641,7 @@ impl App {
         };
 
         // ── Top bar ────────────────────────────────────────────────────
+        let mut open_transfer = false;
         let mut open_db_rename: Option<String> = None;
         egui::TopBottomPanel::top("session_top").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -668,6 +689,10 @@ impl App {
                         ui.close();
                         open_db_rename = Some(current_db.clone());
                     }
+                    if ui.button("Transfer data…").clicked() {
+                        ui.close();
+                        open_transfer = true;
+                    }
                 });
                 if ui.button("⟳ Refresh").clicked() {
                     self.load_databases(&conn_id);
@@ -677,6 +702,9 @@ impl App {
 
         if let Some(old) = open_db_rename {
             self.open_db_rename(old);
+        }
+        if open_transfer {
+            self.open_transfer(&conn_id);
         }
 
         // ── Left: object browser ───────────────────────────────────────

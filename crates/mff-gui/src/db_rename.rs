@@ -257,7 +257,7 @@ fn run_db_rename(
             ))?;
             let mut sql = grid_value(&g, "Create View")
                 .ok_or_else(|| format!("no definition returned for view {}", v.name))?;
-            sql = qualify_view_definition(&sql, old, new);
+            sql = mff_core::sqlgen::qualify_view_definition(&sql, old, new);
             run(&sql)?;
             run(&format!("DROP VIEW {}", q_old_table(&v.name)))?;
         }
@@ -316,47 +316,4 @@ fn run_db_rename(
         }
         Ok(())
     })()
-}
-
-/// Rewrite a `SHOW CREATE VIEW` statement so the view lives in `new_db`
-/// and its body references tables from `new_db` instead of `old_db`.
-pub fn qualify_view_definition(sql: &str, old_db: &str, new_db: &str) -> String {
-    let mut out = sql.replace(
-        &format!("`{}`.", old_db),
-        &format!("`{}`.", new_db),
-    );
-    // MariaDB already qualifies the view name with the database it lives
-    // in (which the rewrite above retargets). Inject the qualifier only
-    // when the definition came back unqualified.
-    if let Some(pos) = out.find(" VIEW ") {
-        let after = &out[pos + " VIEW ".len()..];
-        if !after.starts_with(&format!("`{}`.", new_db)) {
-            let insert = format!(" VIEW {}.", quote_ident(new_db));
-            out.replace_range(pos..pos + " VIEW ".len(), &insert);
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::qualify_view_definition;
-
-    #[test]
-    fn view_definition_is_fully_qualified() {
-        // MariaDB qualifies the view name with its database.
-        let shown = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `db_rename_src`.`v_labels` AS select `db_rename_src`.`t1`.`id` AS `id`,`db_rename_src`.`t1`.`label` AS `label` from `db_rename_src`.`t1`";
-        let out = qualify_view_definition(shown, "db_rename_src", "dbrenamedst3");
-        assert!(out.contains("VIEW `dbrenamedst3`.`v_labels` AS"), "got: {out}");
-        assert!(out.contains("`dbrenamedst3`.`t1`"));
-        assert!(!out.contains("`db_rename_src`."), "old db still referenced");
-        assert!(!out.contains("`dbrenamedst3`.`dbrenamedst3`"), "double qualifier");
-    }
-
-    #[test]
-    fn unqualified_view_name_gets_qualified() {
-        let shown = "CREATE ALGORITHM=UNDEFINED VIEW `v_labels` AS select * from `users`";
-        let out = qualify_view_definition(shown, "db_rename_src", "dbrenamedst3");
-        assert!(out.contains("VIEW `dbrenamedst3`.`v_labels` AS"), "got: {out}");
-    }
 }

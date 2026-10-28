@@ -335,12 +335,44 @@ fn key_columns_sql(cols: &[(String, Option<u32>)]) -> String {
     format!("({inner})")
 }
 
-/// Generate batched multi-row `INSERT` statements for the given grid.
-///
-/// Returns the (possibly empty) list of statements plus the number of data
-/// rows covered.
-pub fn insert_statements(
-    table: &str,
+/// Rewrite a `SHOW CREATE VIEW` statement so the view lives in `new_db`
+/// and its body references tables from `new_db` instead of `old_db`.
+/// MariaDB already qualifies the view name with its own database, in which
+/// case the rewrite above covers it; the explicit qualifier is only added
+/// when the definition came back unqualified.
+pub fn qualify_view_definition(sql: &str, old_db: &str, new_db: &str) -> String {
+    let mut out = sql.replace(&format!("`{}`.", old_db), &format!("`{}`.", new_db));
+    if let Some(pos) = out.find(" VIEW ") {
+        let after = &out[pos + " VIEW ".len()..];
+        if !after.starts_with(&format!("`{}`.", new_db)) {
+            let insert = format!(" VIEW {}.", quote_ident(new_db));
+            out.replace_range(pos..pos + " VIEW ".len(), &insert);
+        }
+    }
+    out
+}
+
+/// Qualify the table name of a `SHOW CREATE TABLE` statement with a
+/// database: "CREATE TABLE `t` (...)" becomes
+/// "CREATE TABLE `db`.`t` (...)".
+pub fn qualify_create_table(sql: &str, db: &str) -> String {
+    if let Some(pos) = sql.find("CREATE TABLE `") {
+        let split = pos + "CREATE TABLE `".len();
+        let mut out = String::with_capacity(sql.len() + db.len() + 2);
+        out.push_str(&sql[..split]);
+        out.push_str(db);
+        out.push_str("`.`");
+        out.push_str(&sql[split..]);
+        out
+    } else {
+        sql.to_string()
+    }
+}
+
+/// Like [`insert_statements`], but the destination is an already-quoted
+/// (possibly database-qualified) table reference.
+pub fn insert_statements_into(
+    qualified: &str,
     grid: &Grid,
     batch_size: usize,
     include_column_list: bool,
@@ -363,10 +395,7 @@ pub fn insert_statements(
     } else {
         String::new()
     };
-    let prefix = format!(
-        "INSERT INTO {}{col_list} VALUES",
-        quote_ident(table)
-    );
+    let prefix = format!("INSERT INTO {qualified}{col_list} VALUES");
 
     let mut batch: Vec<String> = Vec::new();
     let mut count = 0usize;
@@ -388,6 +417,19 @@ pub fn insert_statements(
         out.push(format!("{prefix}\n{}\n;", batch.join(",\n")));
     }
     (out, count)
+}
+
+/// Generate batched multi-row `INSERT` statements for the given grid.
+///
+/// Returns the (possibly empty) list of statements plus the number of data
+/// rows covered.
+pub fn insert_statements(
+    table: &str,
+    grid: &Grid,
+    batch_size: usize,
+    include_column_list: bool,
+) -> (Vec<String>, usize) {
+    insert_statements_into(&quote_ident(table), grid, batch_size, include_column_list)
 }
 
 #[cfg(test)]
@@ -446,6 +488,27 @@ mod tests {
             stmts[0],
             "INSERT INTO `t` (`id`, `name`, `data`, `ts`) VALUES\n(42, 'O''Brien', 0xDEAD, NULL)\n;"
         );
+    }
+
+    #[test]
+    fn view_definition_is_qualified() {
+        let shown = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `db_rename_src`.`v_labels` AS select `db_rename_src`.`t1`.`id` AS `id` from `db_rename_src`.`t1`";
+        let out = qualify_view_definition(shown, "db_rename_src", "dst3");
+        assert!(out.contains("VIEW `dst3`.`v_labels` AS"), "got: {out}");
+        assert!(out.contains("`dst3`.`t1`"));
+        assert!(!out.contains("`db_rename_src`."), "old db still referenced");
+        assert!(!out.contains("`dst3`.`dst3`"), "double qualifier");
+        // Unqualified definitions get the qualifier injected.
+        let unq = "CREATE ALGORITHM=UNDEFINED VIEW `v_labels` AS select * from `users`";
+        let out2 = qualify_view_definition(unq, "db_rename_src", "dst3");
+        assert!(out2.contains("VIEW `dst3`.`v_labels` AS"), "got: {out2}");
+    }
+
+    #[test]
+    fn create_table_is_qualified() {
+        let shown = "CREATE TABLE `t1` (\n  `id` int NOT NULL\n) ENGINE=InnoDB";
+        let out = qualify_create_table(shown, "dst3");
+        assert!(out.contains("CREATE TABLE `dst3`.`t1` ("), "got: {out}");
     }
 
     #[test]

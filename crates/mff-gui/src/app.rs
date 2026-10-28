@@ -24,6 +24,7 @@ pub struct App {
     pub theme: egui::Theme,
     pub new_dlg: Option<crate::new_dialog::NewDialog>,
     pub db_rename_dlg: Option<crate::db_rename::DbRenameDialog>,
+    pub transfer_dlg: Option<crate::transfer::TransferDialog>,
 }
 
 impl App {
@@ -48,6 +49,7 @@ impl App {
             theme: egui::Theme::Light,
             new_dlg: None,
             db_rename_dlg: None,
+            transfer_dlg: None,
         }
     }
 
@@ -342,6 +344,17 @@ impl eframe::App for App {
                     self.show_db_rename_dialog(ctx, &id);
                 } else {
                     self.db_rename_dlg = None;
+                }
+            }
+        }
+
+        // "Data transfer" modal.
+        if self.transfer_dlg.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_transfer_dialog(ctx, &id);
+                } else {
+                    self.transfer_dlg = None;
                 }
             }
         }

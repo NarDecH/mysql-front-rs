@@ -70,12 +70,15 @@ pub fn install(ctx: &Context) {
 
 /// A filled primary-action button in the accent colour.
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(primary_button_widget(ui, label))
+}
+
+/// A primary-styled egui Button widget (for add_enabled call sites).
+pub fn primary_button_widget(ui: &egui::Ui, label: &str) -> egui::Button<'static> {
     let c = accent(ui.ctx());
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).strong().color(Color32::WHITE))
-            .fill(c)
-            .min_size(egui::vec2(0.0, 24.0)),
-    )
+    egui::Button::new(egui::RichText::new(label.to_string()).strong().color(Color32::WHITE))
+        .fill(c)
+        .min_size(egui::vec2(0.0, 24.0))
 }
 
 /// Draw one object-browser entry: coloured glyph + normal text.

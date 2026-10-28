@@ -71,6 +71,13 @@ pub enum UiMsg {
         new_db: String,
         result: std::result::Result<(), String>,
     },
+    TransferDone {
+        conn_id: String,
+        text: String,
+        ok: bool,
+        target_same_server: bool,
+        target_db: String,
+    },
     Status(String),
 }
 

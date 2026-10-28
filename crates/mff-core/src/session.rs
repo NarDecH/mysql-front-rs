@@ -185,6 +185,54 @@ impl Session {
         })
     }
 
+    /// Open a session that uses a single dedicated connection whose session
+    /// state (`USE db`, `SET FOREIGN_KEY_CHECKS`, …) persists across
+    /// statements. Used for multi-step operations like data transfer.
+    pub fn connect_dedicated(c: &Connection) -> Result<Session> {
+        if c.host.trim().is_empty() {
+            return Err(MffError::Invalid("host must not be empty".into()));
+        }
+        let builder = OptsBuilder::default()
+            .ip_or_hostname(Some(c.host.trim().to_string()))
+            .tcp_port(c.port)
+            .user(Some(c.user.trim().to_string()))
+            .pass(Some(c.password.clone()))
+            .db_name(c.database.clone().filter(|d| !d.trim().is_empty()))
+            .prefer_socket(false)
+            .tcp_connect_timeout(Some(Duration::from_secs(c.timeout_secs.max(1))))
+            .ssl_opts(ssl_opts(c.ssl_mode))
+            .pool_opts(
+                mysql::PoolOpts::default()
+                    .with_constraints(mysql::PoolConstraints::new(1, 1).unwrap_or_default())
+                    .with_reset_connection(false),
+            );
+
+        let pool = Pool::new(builder)?;
+        let mut conn = pool.get_conn()?;
+
+        let charset = if c.charset.trim().is_empty() {
+            "utf8mb4"
+        } else {
+            c.charset.trim()
+        };
+        let _ = conn.query_drop(format!("SET NAMES {charset}"));
+
+        let version: String = conn
+            .query_first("SELECT VERSION()")
+            .map_err(MffError::from)?
+            .unwrap_or_default();
+
+        Ok(Session {
+            pool,
+            info: ServerInfo {
+                version,
+                user: c.user.clone(),
+                host: c.host.clone(),
+                port: c.port,
+            },
+        })
+    }
+
     /// Static information gathered at connect time.
     pub fn info(&self) -> &ServerInfo {
         &self.info
