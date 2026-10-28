@@ -25,6 +25,12 @@ enum DataAction {
     Structure(String),
     Export,
     Import,
+    /// Follow a foreign-key cell to the referenced row.
+    FollowFk {
+        table: String,
+        column: String,
+        value: String,
+    },
     /// UPDATE one cell (`text` is the user-typed value; `NULL` → SQL NULL).
     ApplyEdit {
         row: usize,
@@ -39,6 +45,7 @@ impl App {
     pub fn show_data_view(&mut self, ui: &mut egui::Ui, ctx: &Context, conn_id: &str) {
         let mut actions: Vec<DataAction> = Vec::new();
         let export_open;
+        let mut d_status: Option<String> = None;
 
         {
             let Some(state) = self.sessions.get_mut(conn_id) else {
@@ -172,6 +179,8 @@ impl App {
                     editing,
                     &mut edit_value,
                     &mut just_started,
+                    &d.table,
+                    &d.fks,
                 );
                 events.extend(evs);
                 d.selected = sel;
@@ -189,6 +198,7 @@ impl App {
             }
 
             // Translate grid events into actions / state changes.
+            let mut clipboard: Option<String> = None;
             for ev in events {
                 match ev {
                     GridEvent::HeaderSort(col) => {
@@ -277,7 +287,62 @@ impl App {
                             }
                         }
                     }
+                    GridEvent::CopyRowTsv(r) => {
+                        if let Some(grid) = &d.grid {
+                            if let Some(&actual) = compute_visible(grid, &find_lower).get(r) {
+                                let line = grid.rows[actual]
+                                    .iter()
+                                    .map(cell_text)
+                                    .collect::<Vec<_>>()
+                                    .join("\t");
+                                clipboard = Some(line);
+                            }
+                        }
+                    }
+                    GridEvent::CopyRowInsert(r) => {
+                        if let Some(grid) = &d.grid {
+                            if let Some(&actual) = compute_visible(grid, &find_lower).get(r) {
+                                let one = Grid {
+                                    columns: grid.columns.clone(),
+                                    rows: vec![grid.rows[actual].clone()],
+                                };
+                                let (stmts, _) = mff_core::sqlgen::insert_statements_into(
+                                    &mff_core::sqlgen::quote_ident(&d.table),
+                                    &one,
+                                    1,
+                                    true,
+                                );
+                                if let Some(stmt) = stmts.first() {
+                                    clipboard = Some(stmt.clone());
+                                }
+                            }
+                        }
+                    }
+                    GridEvent::FollowFk(r, c) => {
+                        if let Some(grid) = &d.grid {
+                            let visible = compute_visible(grid, &find_lower);
+                            if let (Some(&actual), Some(fk)) = (
+                                visible.get(r),
+                                d.fks.iter().find(|f| f.0 == grid.columns[c].name),
+                            ) {
+                                let value = cell_text(&grid.rows[actual][c]);
+                                if value == "NULL" {
+                                    // nothing to follow
+                                } else {
+                                    actions.push(DataAction::FollowFk {
+                                        table: fk.1.clone(),
+                                        column: fk.2.clone(),
+                                        value,
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            if let Some(text) = clipboard {
+                d_status = Some(format!("copied: {}", truncate(&text, 60)));
+                ui.ctx().copy_text(text);
             }
 
             // ── Footer: pagination ─────────────────────────────────────
@@ -339,6 +404,10 @@ impl App {
             export_open = d.export_open;
         }
 
+        if let Some(msg) = d_status {
+            self.status = msg;
+        }
+
         // ── Deferred actions (need &mut self) ──────────────────────────
         for action in actions {
             match action {
@@ -366,6 +435,16 @@ impl App {
                         .map(|s| s.data.table.clone())
                         .unwrap_or_default();
                     self.open_import_dialog(conn_id, table);
+                }
+                DataAction::FollowFk {
+                    table,
+                    column,
+                    value,
+                } => {
+                    let filter =
+                        format!("{} = {}", mff_core::sqlgen::quote_ident(&column), mff_core::sqlgen::quote_string(&value));
+                    session_view::open_data_filtered(self, conn_id, table.clone(), Some(filter));
+                    self.status = format!("following {} → {}.{}", column, table, column);
                 }
                 DataAction::ApplyEdit { row, col, text } => {
                     self.apply_cell_edit(conn_id, row, col, &text);
@@ -582,9 +661,15 @@ enum GridEvent {
     DeleteRow(usize),
     SetNull(usize, usize),
     ViewCell(usize, usize),
+    /// Row menu: copy the row (tab separated / as INSERT).
+    CopyRowTsv(usize),
+    CopyRowInsert(usize),
+    /// Cell context menu: jump to the referenced row.
+    FollowFk(usize, usize),
 }
 
 /// Render the editable data grid. Returns the events of this frame.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn render_data_grid(
     ui: &mut egui::Ui,
@@ -595,6 +680,8 @@ fn render_data_grid(
     editing: Option<(usize, usize)>,
     edit_value: &mut String,
     just_started: &mut bool,
+    table: &str,
+    fks: &[(String, String, String)],
 ) -> Vec<GridEvent> {
     use egui_extras::{Column, TableBuilder};
 
@@ -608,7 +695,7 @@ fn render_data_grid(
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .min_scrolled_height(0.0);
-    table = table.columns(Column::initial(44.0).resizable(false), 1);
+    table = table.columns(Column::initial(64.0).resizable(false), 1);
     table = table.columns(
         Column::initial(140.0).resizable(true).clip(true).at_least(40.0),
         ncols,
@@ -645,11 +732,47 @@ fn render_data_grid(
                     ui.horizontal(|ui| {
                         ui.small((r + 1).to_string());
                         ui.add_space(2.0);
-                        ui.menu_button("⋯", |ui| {
+                        ui.menu_button("…", |ui| {
                             if ui.button("View selected cell").clicked() {
                                 ui.close();
                                 if let Some((_, c)) = selection {
                                     events.push(GridEvent::ViewCell(di, c));
+                                }
+                            }
+                            if ui
+                                .button("⧉ Copy row (TSV)")
+                                .on_hover_text("Tab-separated cells — paste into a spreadsheet")
+                                .clicked()
+                            {
+                                ui.close();
+                                events.push(GridEvent::CopyRowTsv(di));
+                            }
+                            if ui
+                                .button("⧉ Copy row as INSERT")
+                                .on_hover_text("INSERT statement for this row")
+                                .clicked()
+                            {
+                                ui.close();
+                                events.push(GridEvent::CopyRowInsert(di));
+                            }
+                            // FK navigation for the selected cell of this row.
+                            if let Some((sr, sc)) = selection {
+                                if sr == r {
+                                    if let Some((_, ref_table, ref_col)) =
+                                        fks.iter().find(|f| f.0 == grid.columns[sc].name)
+                                    {
+                                        if ui
+                                            .button(format!(
+                                                "➜ Go to {} ({} …)",
+                                                ref_table, ref_col
+                                            ))
+                                            .on_hover_text("Open the referenced row")
+                                            .clicked()
+                                        {
+                                            ui.close();
+                                            events.push(GridEvent::FollowFk(di, sc));
+                                        }
+                                    }
                                 }
                             }
                             if ui
@@ -714,6 +837,19 @@ fn render_data_grid(
                             if ui.button("⤢ View value").clicked() {
                                 ui.close();
                                 events.push(GridEvent::ViewCell(di, c));
+                            }
+                            // Jump to the row this FK points at.
+                            if let Some((_, ref_table, ref_col)) =
+                                fks.iter().find(|f| f.0 == grid.columns[c].name)
+                            {
+                                if ui
+                                    .button(format!("➜ Go to {} ({} …)", ref_table, ref_col))
+                                    .on_hover_text("Open the referenced row")
+                                    .clicked()
+                                {
+                                    ui.close();
+                                    events.push(GridEvent::FollowFk(di, c));
+                                }
                             }
                             if ui.button("Set NULL").clicked() {
                                 ui.close();

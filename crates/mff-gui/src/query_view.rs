@@ -79,6 +79,7 @@ impl App {
         let mut run_clicked = false;
         let mut clear_clicked = false;
         let mut format_clicked = false;
+        let mut explain_clicked = false;
         let elapsed: Option<u128>;
         // Suggestion chosen via Enter/Tab (set before the editor renders).
         let mut key_accept = false;
@@ -136,6 +137,15 @@ impl App {
                     .clicked()
                 {
                     format_clicked = true;
+                }
+                if ui
+                    .button("🔍 Explain")
+                    .on_hover_text(
+                        "Run EXPLAIN on every SELECT/INSERT/UPDATE/DELETE/REPLACE statement",
+                    )
+                    .clicked()
+                {
+                    explain_clicked = true;
                 }
                 if ui.button("✕ Clear results").clicked() {
                     clear_clicked = true;
@@ -328,6 +338,30 @@ impl App {
                     }
                 });
             ui.separator();
+        }
+
+        if explain_clicked && !running {
+            let stmts = mff_core::sqlsplit::split_statements(&code);
+            let mut parts: Vec<String> = Vec::new();
+            for st in &stmts {
+                let first = st
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches('`')
+                    .to_ascii_uppercase();
+                if matches!(
+                    first.as_str(),
+                    "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "TABLE"
+                ) {
+                    parts.push(format!("EXPLAIN {}", st.trim()));
+                }
+            }
+            if parts.is_empty() {
+                self.status = "nothing to explain (needs SELECT/INSERT/UPDATE/DELETE/REPLACE)".into();
+            } else {
+                self.run_query(conn_id, active, parts.join(";\n"), false);
+            }
         }
 
         let ctrl_enter = ui.ctx().input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl);

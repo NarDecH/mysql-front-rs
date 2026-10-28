@@ -317,6 +317,64 @@ impl App {
         }
     }
 
+    /// One tab per open connection; "＋" returns to the connections
+    /// screen, ✕ disconnects.
+    fn show_session_tabs(&mut self, ctx: &Context) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let active = self.active_conn.clone().unwrap_or_default();
+        let mut tabs: Vec<(String, String)> = self
+            .sessions
+            .iter()
+            .map(|(id, s)| (id.clone(), s.conn_name.clone()))
+            .collect();
+        tabs.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let mut switch_to: Option<String> = None;
+        let mut close_id: Option<String> = None;
+        let mut go_home = false;
+        egui::TopBottomPanel::top("session_tabs").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                for (id, name) in &tabs {
+                    let selected = *id == active;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(selected, egui::RichText::new(name).strong())
+                            .clicked()
+                        {
+                            switch_to = Some(id.clone());
+                        }
+                        if ui
+                            .small_button("✕")
+                            .on_hover_text(format!("disconnect {name}"))
+                            .clicked()
+                        {
+                            close_id = Some(id.clone());
+                        }
+                    });
+                }
+                ui.separator();
+                if ui
+                    .button("＋")
+                    .on_hover_text("Open another connection")
+                    .clicked()
+                {
+                    go_home = true;
+                }
+            });
+        });
+        if let Some(id) = switch_to {
+            self.active_conn = Some(id);
+        }
+        if let Some(id) = close_id {
+            self.disconnect(&id);
+        }
+        if go_home {
+            self.active_conn = None;
+        }
+    }
+
     /// Top bar of the session workspace (copy cell + back home).
     fn show_session_top(&mut self, ctx: &Context, _conn_id: &str) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -366,6 +424,7 @@ impl eframe::App for App {
                 self.active_conn = None;
                 return;
             }
+            self.show_session_tabs(ctx);
             self.show_session_top(ctx, &conn_id);
             self.show_session(ctx, conn_id);
         }

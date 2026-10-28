@@ -100,6 +100,8 @@ pub struct DataState {
     pub export_open: bool,
     /// Primary-key columns of the browsed table (empty → no editing).
     pub pk_cols: Vec<String>,
+    /// Foreign keys of the browsed table: (column, ref_table, ref_column).
+    pub fks: Vec<(String, String, String)>,
     /// The cell currently being edited inline, if any.
     pub editing: Option<CellEdit>,
     /// Buffer of the in-progress cell edit.
@@ -132,6 +134,7 @@ impl Default for DataState {
             error: None,
             export_open: false,
             pk_cols: Vec::new(),
+            fks: Vec::new(),
             editing: None,
             edit_value: String::new(),
             find: String::new(),
@@ -347,6 +350,22 @@ impl App {
             let filter_opt = Some(filter.as_str()).filter(|f| !f.is_empty());
             let sort_ref = sort.as_ref().map(|(c, a)| (c.as_str(), *a));
             let pk = session.primary_key_cols(&db, &table).unwrap_or_default();
+            // Foreign keys for "go to referenced row" navigation.
+            let fks: Vec<(String, String, String)> = session
+                .table_schema(&db, &table)
+                .map(|t| {
+                    t.foreign_keys
+                        .iter()
+                        .flat_map(|fk| {
+                            fk.columns
+                                .iter()
+                                .cloned()
+                                .zip(fk.ref_columns.iter().cloned())
+                                .map(move |(c, rc)| (c, fk.ref_table.clone(), rc))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             let rows = session.table_rows(
                 &db,
                 &table,
@@ -359,7 +378,7 @@ impl App {
                 .count_rows(&db, &table, Some(filter.as_str()).filter(|f| !f.is_empty()))
                 .unwrap_or(0);
             let result = match rows {
-                Ok(grid) => Ok((grid, total, pk)),
+                Ok(grid) => Ok((grid, total, pk, fks)),
                 Err(e) => Err(e.to_string()),
             };
             let _ = tx.send(UiMsg::DataLoaded {
@@ -1014,10 +1033,11 @@ impl App {
                     if state.data.table == table {
                         state.data.loading = false;
                         match result {
-                            Ok((grid, total, pk)) => {
+                            Ok((grid, total, pk, fks)) => {
                                 state.data.grid = Some(grid);
                                 state.data.total = Some(total);
                                 state.data.pk_cols = pk;
+                                state.data.fks = fks;
                                 state.data.editing = None;
                                 state.data.edit_value.clear();
                             }
@@ -1152,6 +1172,52 @@ impl App {
                 state.current_db.clone(),
             )
         };
+
+        // ── Keyboard shortcuts ─────────────────────────────────────────
+        // F5 refreshes whatever view is active; Ctrl+T opens a new query tab.
+        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+            let view = self.sessions.get(&conn_id).map(|s| s.view);
+            match view {
+                Some(ActiveView::Data) => {
+                    let table = self
+                        .sessions
+                        .get(&conn_id)
+                        .map(|s| s.data.table.clone())
+                        .unwrap_or_default();
+                    if !table.is_empty() {
+                        reopen_data_current(self, &conn_id, table);
+                    }
+                }
+                Some(ActiveView::Structure) => {
+                    let table = self
+                        .sessions
+                        .get(&conn_id)
+                        .map(|s| s.structure.table.clone())
+                        .unwrap_or_default();
+                    if !table.is_empty() {
+                        self.load_schema(&conn_id, table);
+                    }
+                }
+                Some(ActiveView::Info) => self.load_variables(&conn_id),
+                Some(ActiveView::Server) => {
+                    let session = self.sessions.get(&conn_id).map(|s| s.session.clone());
+                    if let Some(session) = session {
+                        self.refresh_server_tab(&conn_id);
+                        let _ = session;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::T) && i.modifiers.ctrl) {
+            if let Some(state) = self.sessions.get_mut(&conn_id) {
+                state
+                    .queries
+                    .push(QueryTab::new(format!("Query {}", state.queries.len() + 1)));
+                state.active_query = state.queries.len() - 1;
+                state.view = ActiveView::Query;
+            }
+        }
 
         // ── Top bar ────────────────────────────────────────────────────
         let mut open_transfer = false;
@@ -1909,6 +1975,17 @@ fn tab_button(
 
 /// Open the data view of a table and (re)load its rows.
 pub fn open_data(app: &mut App, conn_id: &str, table: String) {
+    open_data_filtered(app, conn_id, table, None);
+}
+
+/// Open the data view with an initial WHERE filter (e.g. following a
+/// foreign key to the referenced row).
+pub fn open_data_filtered(
+    app: &mut App,
+    conn_id: &str,
+    table: String,
+    filter: Option<String>,
+) {
     {
         let Some(state) = app.sessions.get_mut(conn_id) else {
             return;
@@ -1916,8 +1993,9 @@ pub fn open_data(app: &mut App, conn_id: &str, table: String) {
         state.view = ActiveView::Data;
         state.data.offset = 0;
         state.data.sort = None;
-        state.data.filter_applied = String::new();
-        state.data.filter_input = String::new();
+        let f = filter.unwrap_or_default();
+        state.data.filter_applied = f.clone();
+        state.data.filter_input = f;
         state.data.selected = None;
     }
     app.load_data(conn_id, table);

@@ -37,7 +37,10 @@ pub enum UiMsg {
     DataLoaded {
         conn_id: String,
         table: String,
-        result: std::result::Result<(Grid, u64, Vec<String>), String>,
+        result: std::result::Result<
+            (Grid, u64, Vec<String>, Vec<(String, String, String)>),
+            String,
+        >,
     },
     SchemaLoaded {
         conn_id: String,
