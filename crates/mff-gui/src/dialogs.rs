@@ -13,6 +13,8 @@ pub struct ConnEditor {
     pub conn: Connection,
     /// Editing buffer for the optional database name.
     pub database_tmp: String,
+    /// Editing buffer for the optional SSH key file path.
+    pub ssh_key_tmp: String,
     pub error: Option<String>,
     pub testing: bool,
 }
@@ -25,6 +27,7 @@ impl ConnEditor {
             editing_id: None,
             conn,
             database_tmp,
+            ssh_key_tmp: String::new(),
             error: None,
             testing: false,
         }
@@ -32,10 +35,12 @@ impl ConnEditor {
 
     pub fn from(conn: Connection) -> Self {
         let database_tmp = conn.database.clone().unwrap_or_default();
+        let ssh_key_tmp = conn.ssh_key_path.clone().unwrap_or_default();
         Self {
             editing_id: Some(conn.id.clone()),
             conn,
             database_tmp,
+            ssh_key_tmp,
             error: None,
             testing: false,
         }
@@ -99,6 +104,7 @@ impl App {
             .show(ctx, |ui| {
                 let mut db_tmp = editor.database_tmp.clone();
                 let mut db_resp = None;
+                editor.ssh_key_tmp = editor.conn.ssh_key_path.clone().unwrap_or_default();
                 egui::Grid::new("conn_form")
                     .num_columns(2)
                     .spacing([8.0, 6.0])
@@ -201,9 +207,79 @@ impl App {
                                 .desired_rows(2),
                         );
                         ui.end_row();
+
+                        ui.label("Password storage");
+                        ui.checkbox(
+                            &mut editor.conn.password_in_keychain,
+                            "store in OS keychain",
+                        )
+                        .on_hover_text(
+                            "The password is kept in Windows Credential Manager \
+                             instead of connections.json",
+                        );
+                        ui.end_row();
+
+                        ui.label("SSH tunnel");
+                        ui.checkbox(&mut editor.conn.ssh_enabled, "connect through SSH")
+                            .on_hover_text("Reach the server through an SSH host (ssh -L)");
+                        ui.end_row();
+
+                        if editor.conn.ssh_enabled {
+                            ui.label("SSH host");
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut editor.conn.ssh_host)
+                                        .desired_width(140.0)
+                                        .hint_text("(empty = same as Host)"),
+                                );
+                                ui.label(":");
+                                ui.add(
+                                    egui::DragValue::new(&mut editor.conn.ssh_port)
+                                        .range(1..=65535),
+                                );
+                            });
+                            ui.end_row();
+                            ui.label("SSH user");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut editor.conn.ssh_user)
+                                    .desired_width(240.0),
+                            );
+                            ui.end_row();
+                            ui.label("SSH password");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut editor.conn.ssh_password)
+                                    .password(true)
+                                    .desired_width(240.0),
+                            )
+                            .on_hover_text(
+                                "SSH password, or the passphrase when a key file is set",
+                            );
+                            ui.end_row();
+                            ui.label("SSH key file");
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(
+                                        &mut editor.ssh_key_tmp,
+                                    )
+                                    .desired_width(180.0)
+                                    .hint_text("(empty = password auth)"),
+                                );
+                                if ui.button("…").clicked() {
+                                    if let Some(p) = rfd::FileDialog::new()
+                                        .add_filter("Key files", &["ppk", "pem", "key", "*"])
+                                        .pick_file()
+                                    {
+                                        editor.ssh_key_tmp = p.display().to_string();
+                                    }
+                                }
+                            });
+                            ui.end_row();
+                        }
                     });
                 let _ = db_resp;
                 editor.database_tmp = db_tmp;
+                let k = editor.ssh_key_tmp.trim().to_string();
+                editor.conn.ssh_key_path = if k.is_empty() { None } else { Some(k) };
 
                 if let Some(err) = &editor.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, format!("⚠ {err}"));
@@ -254,6 +330,17 @@ impl App {
                 let mut conn = editor.conn.clone();
                 if editor.editing_id.is_none() {
                     conn.id = Connection::new_id();
+                }
+                if conn.password_in_keychain {
+                    if let Err(e) = conn.store_password_keychain() {
+                        editor.error = Some(e.to_string());
+                        self.conn_edit = Some(editor);
+                        return;
+                    }
+                    // The registry file never sees the password.
+                    conn.password = String::new();
+                } else {
+                    conn.delete_password_keychain();
                 }
                 match save_connection(&mut self.registry, conn.clone()) {
                     Ok(()) => self.status = format!("connection “{}” saved", conn.name),

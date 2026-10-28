@@ -29,6 +29,7 @@ pub mod import;
 pub mod model;
 pub mod session;
 pub mod sqlgen;
+pub mod ssh;
 pub mod sqlfmt;
 pub mod suggest;
 pub mod sqlsplit;

@@ -279,7 +279,15 @@ impl SessionState {
 
 impl App {
     /// Open a session for the given connection (background job).
-    pub fn connect(&mut self, conn: mff_core::Connection) {
+    pub fn connect(&mut self, mut conn: mff_core::Connection) {
+        // The registry file stores no password when the keychain flag is
+        // set — resolve it here so the worker thread sees the secret.
+        if conn.password_in_keychain && conn.password.is_empty() {
+            if let Err(e) = conn.load_password_keychain() {
+                self.status = format!("keychain: {e}");
+                return;
+            }
+        }
         let tx = self.jobs.sender();
         let conn_id = conn.id.clone();
         self.status = format!("connecting to {} …", conn.host_port());

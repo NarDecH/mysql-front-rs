@@ -89,7 +89,33 @@ pub struct Connection {
     /// Free-form user comments.
     #[serde(default)]
     pub comments: String,
+    /// Route the TCP connection through an SSH tunnel.
+    #[serde(default)]
+    pub ssh_enabled: bool,
+    /// SSH server (empty → same host as `host`).
+    #[serde(default)]
+    pub ssh_host: String,
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_user: String,
+    /// SSH password, or the passphrase when `ssh_key_path` is set.
+    #[serde(default)]
+    pub ssh_password: String,
+    /// Optional OpenSSH private key file (empty → password auth).
+    #[serde(default)]
+    pub ssh_key_path: Option<String>,
+    /// Store the MySQL password in the OS keychain instead of this file.
+    #[serde(default)]
+    pub password_in_keychain: bool,
 }
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+/// Service name under which passwords are stored in the OS keychain.
+pub const KEYCHAIN_SERVICE: &str = "mysql-front-rs";
 
 fn default_charset() -> String {
     "utf8mb4".to_string()
@@ -113,11 +139,45 @@ impl Default for Connection {
             ssl_mode: SslMode::default(),
             timeout_secs: default_timeout(),
             comments: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: default_ssh_port(),
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: None,
+            password_in_keychain: false,
         }
     }
 }
 
 impl Connection {
+    /// Write the current password into the OS keychain.
+    pub fn store_password_keychain(&self) -> Result<()> {
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &self.id)
+            .map_err(|e| MffError::Other(format!("keychain: {e}")))?;
+        entry
+            .set_password(&self.password)
+            .map_err(|e| MffError::Other(format!("keychain: {e}")))?;
+        Ok(())
+    }
+
+    /// Read the password from the OS keychain into `self.password`.
+    pub fn load_password_keychain(&mut self) -> Result<()> {
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &self.id)
+            .map_err(|e| MffError::Other(format!("keychain: {e}")))?;
+        self.password = entry
+            .get_password()
+            .map_err(|e| MffError::Other(format!("keychain: {e}")))?;
+        Ok(())
+    }
+
+    /// Remove the keychain entry (called when the flag is turned off).
+    pub fn delete_password_keychain(&self) {
+        if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, &self.id) {
+            let _ = entry.delete_credential();
+        }
+    }
+
     /// Create a connection with a fresh id.
     pub fn new(name: impl Into<String>) -> Self {
         Self {

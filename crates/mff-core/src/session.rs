@@ -5,6 +5,7 @@
 //! well-tested async-capable client library, keeping a thin, grid-oriented
 //! API that the GUI and CLI can share.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use mysql::{OptsBuilder, Pool, Value};
@@ -125,6 +126,8 @@ pub struct ServerInfo {
 pub struct Session {
     pool: Pool,
     info: ServerInfo,
+    /// Keeps the SSH tunnel (if any) alive as long as the session lives.
+    _tunnel: Option<Arc<crate::ssh::SshTunnel>>,
 }
 
 impl std::fmt::Debug for Session {
@@ -140,12 +143,10 @@ impl Session {
     ///
     /// Connects immediately so that errors surface at a well-defined point.
     pub fn connect(c: &Connection) -> Result<Session> {
-        if c.host.trim().is_empty() {
-            return Err(MffError::Invalid("host must not be empty".into()));
-        }
+        let (tunnel, host, port) = open_tunnel(c)?;
         let builder = OptsBuilder::default()
-            .ip_or_hostname(Some(c.host.trim().to_string()))
-            .tcp_port(c.port)
+            .ip_or_hostname(Some(host))
+            .tcp_port(port)
             .user(Some(c.user.trim().to_string()))
             .pass(Some(c.password.clone()))
             .db_name(c.database.clone().filter(|d| !d.trim().is_empty()))
@@ -186,6 +187,7 @@ impl Session {
                 host: c.host.clone(),
                 port: c.port,
             },
+            _tunnel: tunnel.map(Arc::new),
         })
     }
 
@@ -193,12 +195,10 @@ impl Session {
     /// state (`USE db`, `SET FOREIGN_KEY_CHECKS`, …) persists across
     /// statements. Used for multi-step operations like data transfer.
     pub fn connect_dedicated(c: &Connection) -> Result<Session> {
-        if c.host.trim().is_empty() {
-            return Err(MffError::Invalid("host must not be empty".into()));
-        }
+        let (tunnel, host, port) = open_tunnel(c)?;
         let builder = OptsBuilder::default()
-            .ip_or_hostname(Some(c.host.trim().to_string()))
-            .tcp_port(c.port)
+            .ip_or_hostname(Some(host))
+            .tcp_port(port)
             .user(Some(c.user.trim().to_string()))
             .pass(Some(c.password.clone()))
             .db_name(c.database.clone().filter(|d| !d.trim().is_empty()))
@@ -234,6 +234,7 @@ impl Session {
                 host: c.host.clone(),
                 port: c.port,
             },
+            _tunnel: tunnel.map(Arc::new),
         })
     }
 
@@ -743,6 +744,32 @@ mod tests {
         assert_eq!(value_display(&Value::Time(true, 0, 1, 0, 0, 0)), "-01:00:00");
         assert_eq!(value_display(&Value::NULL), "NULL");
     }
+}
+
+/// When the connection is configured with an SSH tunnel, start it and
+/// return `(tunnel, "127.0.0.1", local_port)`; otherwise
+/// `(None, host, port)`.
+fn open_tunnel(c: &Connection) -> Result<(Option<crate::ssh::SshTunnel>, String, u16)> {
+    if !c.ssh_enabled {
+        return Ok((None, c.host.trim().to_string(), c.port));
+    }
+    let ssh_host = if c.ssh_host.trim().is_empty() {
+        c.host.trim()
+    } else {
+        c.ssh_host.trim()
+    };
+    let target = crate::ssh::SshTarget {
+        ssh_host: ssh_host.to_string(),
+        ssh_port: c.ssh_port,
+        ssh_user: c.ssh_user.trim().to_string(),
+        ssh_password: c.ssh_password.clone(),
+        ssh_key_path: c.ssh_key_path.clone(),
+        remote_host: c.host.trim().to_string(),
+        remote_port: c.port,
+    };
+    let tunnel = crate::ssh::SshTunnel::start(&target)?;
+    let local_port = tunnel.local_port;
+    Ok((Some(tunnel), "127.0.0.1".to_string(), local_port))
 }
 
 fn ssl_opts(m: crate::account::SslMode) -> Option<mysql::SslOpts> {
