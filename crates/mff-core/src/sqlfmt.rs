@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-/// Keywords recognised for uppercasing.
-const KEYWORDS: &[&str] = &[
+/// Keywords recognised for uppercasing (also used by suggestions).
+pub const KEYWORDS: &[&str] = &[
     "SELECT", "DISTINCT", "DISTINCTROW", "FROM", "WHERE", "AND", "OR", "XOR", "NOT", "NULL", "IS",
     "IN", "LIKE", "RLIKE", "REGEXP", "BETWEEN", "EXISTS", "AS", "JOIN", "LEFT", "RIGHT", "INNER",
     "OUTER", "CROSS", "FULL", "ON", "USING", "GROUP", "BY", "HAVING", "ORDER", "LIMIT", "OFFSET",

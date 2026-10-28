@@ -117,6 +117,12 @@ pub enum UiMsg {
         conn_id: String,
         result: std::result::Result<String, String>,
     },
+    /// The SQL completion index for one database finished loading.
+    CompletionLoaded {
+        conn_id: String,
+        db: String,
+        result: std::result::Result<mff_core::suggest::CompletionIndex, String>,
+    },
     Status(String),
 }
 

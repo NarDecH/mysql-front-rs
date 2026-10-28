@@ -39,6 +39,17 @@ pub struct SessionState {
     pub history: Vec<String>,
     /// Whether the query-history panel is visible.
     pub history_open: bool,
+    /// SQL completion index for the current database (lazily loaded).
+    pub completion: CompletionUi,
+}
+
+/// The per-session completion index and its load state.
+#[derive(Default)]
+pub struct CompletionUi {
+    pub index: Option<std::sync::Arc<mff_core::suggest::CompletionIndex>>,
+    /// Database the index belongs to.
+    pub db: Option<String>,
+    pub loading: bool,
 }
 
 /// Kind of object selected in the tree (drives the highlight).
@@ -153,6 +164,8 @@ pub struct QueryTab {
     pub sections: Vec<QuerySection>,
     pub running: bool,
     pub elapsed_ms: Option<u128>,
+    /// SQL autocomplete popup state for this tab's editor.
+    pub suggest: crate::query_view::SuggestState,
 }
 
 impl QueryTab {
@@ -163,6 +176,7 @@ impl QueryTab {
             sections: Vec::new(),
             running: false,
             elapsed_ms: None,
+            suggest: Default::default(),
         }
     }
 }
@@ -249,6 +263,7 @@ impl SessionState {
             confirm_drop: None,
             history: Vec::new(),
             history_open: false,
+            completion: Default::default(),
         }
     }
 }
@@ -444,6 +459,29 @@ impl App {
         std::thread::spawn(move || {
             let result = session.variables().map_err(|e| e.to_string());
             let _ = tx.send(UiMsg::VariablesLoaded { conn_id: id, result });
+        });
+    }
+
+    /// Load the SQL completion index for the session's database (background).
+    pub fn load_completion(&mut self, conn_id: &str, db: String) {
+        let Some(state) = self.sessions.get_mut(conn_id) else {
+            return;
+        };
+        if state.completion.loading {
+            return;
+        }
+        state.completion.loading = true;
+        let session = state.session.clone();
+        let tx = self.jobs.sender();
+        let id = conn_id.to_string();
+        state.busy += 1;
+        std::thread::spawn(move || {
+            let result = session.completion_index(&db).map_err(|e| e.to_string());
+            let _ = tx.send(UiMsg::CompletionLoaded {
+                conn_id: id,
+                db,
+                result,
+            });
         });
     }
 
@@ -699,6 +737,26 @@ impl App {
                     };
                     let s = state.session.clone();
                     self.load_user_list(&conn_id, s);
+                }
+            }
+            UiMsg::CompletionLoaded {
+                conn_id,
+                db,
+                result,
+            } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                    state.completion.loading = false;
+                    // Only keep the index if the user hasn't switched away.
+                    if state.current_db == db {
+                        match result {
+                            Ok(index) => {
+                                state.completion.db = Some(db);
+                                state.completion.index = Some(std::sync::Arc::new(index));
+                            }
+                            Err(e) => self.status = format!("completions unavailable: {e}"),
+                        }
+                    }
                 }
             }
             UiMsg::Status(s) => self.status = s,
@@ -989,6 +1047,10 @@ impl App {
                     // Make unqualified queries resolve against the new db.
                     if let (Some(session), false) = (session, db.is_empty()) {
                         let _ = session.use_database(&db);
+                    }
+                    // Suggestions must follow the database switch.
+                    if let Some(state) = self.sessions.get_mut(&conn_id) {
+                        state.completion = Default::default();
                     }
                     if !db.is_empty() {
                         self.load_objects(&conn_id, db);

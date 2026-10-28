@@ -629,6 +629,17 @@ impl Session {
         Ok(rows)
     }
 
+    /// Build the completion index for one database: every table/view with
+    /// its columns, from a single `information_schema` query.
+    pub fn completion_index(&self, db: &str) -> Result<crate::suggest::CompletionIndex> {
+        let mut conn = self.pool.get_conn()?;
+        let rows: Vec<(String, String)> = conn.exec(
+            "SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS              WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION",
+            (db,),
+        )?;
+        Ok(crate::suggest::CompletionIndex::from_pairs(rows))
+    }
+
     /// Switch the session's default database (`USE …`). Safe to call from
     /// a background job; subsequent unqualified statements resolve against
     /// this database.

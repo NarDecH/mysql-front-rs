@@ -28,6 +28,7 @@ pub mod model;
 pub mod session;
 pub mod sqlgen;
 pub mod sqlfmt;
+pub mod suggest;
 pub mod sqlsplit;
 pub mod transfer;
 
