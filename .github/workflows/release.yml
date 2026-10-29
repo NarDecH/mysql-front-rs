@@ -1,0 +1,24 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Release build (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release -p mff-gui
+      - name: Attach exe to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/mysql-front-rs.exe
+          generate_release_notes: true
