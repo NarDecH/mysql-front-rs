@@ -29,9 +29,45 @@ impl App {
         });
         ui.separator();
 
+        // ── Dashboard ──────────────────────────────────────────────────
+        ui.heading("Dashboard");
+        {
+            let Some(state) = self.sessions.get(conn_id) else {
+                return;
+            };
+            if state.server.stats.loading {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.small("loading…");
+                });
+            } else if let Some(rows) = &state.server.stats.rows {
+                egui::Grid::new("server_dashboard")
+                    .num_columns(4)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        for chunk in rows.chunks(2) {
+                            for (k, v) in chunk {
+                                ui.weak(pretty_stat_key(k));
+                                ui.strong(v);
+                            }
+                            if chunk.len() < 2 {
+                                ui.weak("");
+                                ui.weak("");
+                            }
+                            ui.end_row();
+                        }
+                    });
+            } else {
+                ui.weak("(press Refresh to load)");
+            }
+        }
+        ui.add_space(10.0);
+        ui.separator();
+
         // ── Processes ──────────────────────────────────────────────────
         let mut kill_requests: Vec<u64> = Vec::new();
         let mut drop_requests: Vec<(String, String)> = Vec::new();
+        let mut grants_requests: Vec<(String, String)> = Vec::new();
         ui.heading("Processes");
         ui.weak("SHOW FULL PROCESSLIST — kill a connection with ⋯");
         {
@@ -74,7 +110,7 @@ impl App {
                     ui.small("loading…");
                 });
             } else if let Some(grid) = &state.server.users {
-                render_user_list(ui, grid, &mut drop_requests);
+                render_user_list(ui, grid, &mut drop_requests, &mut grants_requests);
             }
         }
 
@@ -88,6 +124,9 @@ impl App {
             if let Some(state) = self.sessions.get_mut(conn_id) {
                 state.server.confirm_drop_user = Some(pair);
             }
+        }
+        for (user, host) in grants_requests {
+            self.load_grants(conn_id, user, host);
         }
 
         // Kill confirmation.
@@ -188,6 +227,7 @@ impl App {
         let session = state.session.clone();
         self.load_process_list(conn_id, session.clone());
         self.load_user_list(conn_id, session);
+        self.load_server_stats(conn_id);
     }
 
     pub fn load_process_list(&mut self, conn_id: &str, session: mff_core::Session) {
@@ -385,14 +425,26 @@ fn quote_user(user: &str, host: &str) -> String {
     )
 }
 
+/// `max_connections` → `Max connections`, `uptime` → `Uptime`.
+fn pretty_stat_key(key: &str) -> String {
+    let mut chars = key.chars();
+    let head = chars.next().map(|c| c.to_ascii_uppercase()).unwrap_or('_');
+    let rest: String = chars
+        .map(|c| if c == '_' { ' ' } else { c })
+        .collect();
+    format!("{head}{rest}")
+}
+
 /// The process list table with a per-row kill menu.
 fn render_process_list(ui: &mut egui::Ui, grid: &Grid, kill_requests: &mut Vec<u64>) {
     use egui_extras::{Column, TableBuilder};
 
     let ncols = grid.columns.len();
-    // Id, User, Host, db, Command, Time, State, Info are the interesting ones.
+    // Id, User, Host, db, Command, Time, State, Info are the interesting ones;
+    // one extra pre-allocated column for the per-row Kill button.
     let widths = [70.0_f32, 90.0, 140.0, 90.0, 80.0, 70.0, 120.0];
     let mut table = TableBuilder::new(ui)
+        .id_salt("process_list")
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -402,8 +454,13 @@ fn render_process_list(ui: &mut egui::Ui, grid: &Grid, kill_requests: &mut Vec<u
         table = table.columns(Column::initial(*w).resizable(true).clip(true), 1);
     }
     if ncols > widths.len() {
-        table = table.columns(Column::initial(240.0).resizable(true).clip(true), ncols - widths.len());
+        table = table.columns(
+            Column::initial(240.0).resizable(true).clip(true),
+            ncols - widths.len(),
+        );
     }
+    // Action column (Kill) — the header/body below render ncols + 1 columns.
+    table = table.columns(Column::initial(60.0).resizable(false), 1);
     table
         .header(22.0, |mut header| {
             for col in &grid.columns {
@@ -448,12 +505,18 @@ fn render_process_list(ui: &mut egui::Ui, grid: &Grid, kill_requests: &mut Vec<u
         });
 }
 
-/// The user list with a per-row drop menu.
-fn render_user_list(ui: &mut egui::Ui, grid: &Grid, drop_requests: &mut Vec<(String, String)>) {
+/// The user list with per-row Drop / Privileges actions.
+fn render_user_list(
+    ui: &mut egui::Ui,
+    grid: &Grid,
+    drop_requests: &mut Vec<(String, String)>,
+    grants_requests: &mut Vec<(String, String)>,
+) {
     use egui_extras::{Column, TableBuilder};
 
     let ncols = grid.columns.len().min(3);
     let mut table = TableBuilder::new(ui)
+        .id_salt("user_list")
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -462,6 +525,9 @@ fn render_user_list(ui: &mut egui::Ui, grid: &Grid, drop_requests: &mut Vec<(Str
     table = table.columns(Column::initial(140.0).resizable(true), 1);
     table = table.columns(Column::initial(140.0).resizable(true), 1);
     table = table.columns(Column::initial(120.0).resizable(true), 1);
+    // Action columns (Privileges…, Drop) — header/body render ncols + 2.
+    table = table.columns(Column::initial(90.0).resizable(false), 1);
+    table = table.columns(Column::initial(70.0).resizable(false), 1);
     table
         .header(22.0, |mut header| {
             for c in 0..ncols {
@@ -515,7 +581,10 @@ fn render_user_list(ui: &mut egui::Ui, grid: &Grid, drop_requests: &mut Vec<(Str
                         )
                         .clicked()
                     {
-                        drop_requests.push((user, host));
+                        drop_requests.push((user.clone(), host.clone()));
+                    }
+                    if ui.small_button("Privileges…").clicked() {
+                        grants_requests.push((user, host));
                     }
                 });
             });

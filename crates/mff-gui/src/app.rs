@@ -32,6 +32,9 @@ pub struct App {
     pub chart: Option<crate::chart::ChartDlg>,
     pub compare_dlg: Option<crate::compare_dlg::CompareDlg>,
     pub compare_report: Option<crate::compare_dlg::CompareReportUi>,
+    pub schemadiff_dlg: Option<crate::schemadiff_dlg::SchemaDiffDlg>,
+    pub schemadiff_result: Option<crate::schemadiff_dlg::SchemaDiffResultUi>,
+    pub search_dlg: Option<crate::search_dlg::SearchDlg>,
     /// Persisted UI state (theme, last connection, query history, …).
     pub app_state: mff_core::AppState,
     /// UI language (persisted in app_state).
@@ -78,6 +81,9 @@ impl App {
             chart: None,
             compare_dlg: None,
             compare_report: None,
+            schemadiff_dlg: None,
+            schemadiff_result: None,
+            search_dlg: None,
             app_state,
             lang,
         }
@@ -438,6 +444,10 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Background jobs deliver results through a channel; without user
+        // input egui would never wake up to drain it. Repaint a few times
+        // a second so job results always show up promptly.
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
         self.poll_jobs();
 
         // Ctrl+C copies the selected data cell.
@@ -559,6 +569,40 @@ impl eframe::App for App {
         }
         if self.compare_report.is_some() {
             self.show_compare_report(ctx);
+        }
+
+        // Schema diff + search.
+        if self.schemadiff_dlg.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_schema_diff_dialog(ctx, &id);
+                } else {
+                    self.schemadiff_dlg = None;
+                }
+            }
+        }
+        if self.schemadiff_result.is_some() {
+            self.show_schema_diff_result(ctx);
+        }
+        if self.search_dlg.is_some() {
+            if let Some(id) = self.active_conn.clone() {
+                if self.sessions.contains_key(&id) {
+                    self.show_search_dialog(ctx, &id);
+                } else {
+                    self.search_dlg = None;
+                }
+            }
+        }
+
+        // GRANT editor (server tab).
+        if self
+            .sessions
+            .get(self.active_conn.as_deref().unwrap_or(""))
+            .map(|s| s.server.grants_editor.is_some())
+            .unwrap_or(false)
+        {
+            let id = self.active_conn.clone().unwrap();
+            self.show_grants_editor(ctx, &id);
         }
 
         // Keep repainting while jobs are in flight so spinners move and

@@ -149,6 +149,46 @@ pub enum UiMsg {
         conn_id: String,
         result: std::result::Result<mff_core::compare::CompareReport, String>,
     },
+    /// A schema diff finished.
+    SchemaDiffDone {
+        conn_id: String,
+        result: std::result::Result<mff_core::schemadiff::SchemaDiff, String>,
+    },
+    /// Schema-diff ALTERs were applied to the target.
+    SchemaDiffApplied {
+        conn_id: String,
+        target: String,
+        result: std::result::Result<(), String>,
+    },
+    /// Global object search finished.
+    SearchDone {
+        conn_id: String,
+        result: std::result::Result<Vec<(String, String, String, String)>, String>,
+    },
+    /// SHOW GRANTS for one user finished.
+    GrantsLoaded {
+        conn_id: String,
+        user: String,
+        host: String,
+        result: std::result::Result<Vec<String>, String>,
+    },
+    /// GRANT/REVOKE statements finished.
+    GrantsApplied {
+        conn_id: String,
+        result: std::result::Result<String, String>,
+    },
+    /// Server overview stats finished.
+    ServerStatsLoaded {
+        conn_id: String,
+        result: std::result::Result<Vec<(String, String)>, String>,
+    },
+    /// An object definition (for editing) finished loading.
+    DefinitionLoaded {
+        conn_id: String,
+        kind: String,
+        name: String,
+        result: std::result::Result<String, String>,
+    },
     /// The table designer's ALTER statements finished.
     DesignApplied {
         conn_id: String,

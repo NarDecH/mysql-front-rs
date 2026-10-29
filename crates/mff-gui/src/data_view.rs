@@ -47,6 +47,7 @@ impl App {
         let export_open;
         let mut d_status: Option<String> = None;
 
+
         let lang = self.lang;
         use crate::i18n::t;
 
@@ -65,6 +66,7 @@ impl App {
 
             // ── Toolbar ────────────────────────────────────────────────
             let mut apply_filter = false;
+            let mut toolbar_clip: Option<String> = None;
             ui.horizontal(|ui| {
                 crate::theme::icon_label(
                     ui,
@@ -109,6 +111,22 @@ impl App {
                     .clicked()
                 {
                     d.cell_view = d.selected;
+                }
+                if let Some(grid) = &d.grid {
+                    let visible = compute_visible(grid, &d.find.to_lowercase());
+                    if let Some(text) = selection_clipboard(grid, &visible, d.multi) {
+                        let size = selection_size(d.multi);
+                        if ui
+                            .button(format!("⧉ Copy {}×{}", size.0, size.1))
+                            .on_hover_text(
+                                "Copy the selected cells (TSV with headers — \
+                                 click a cell, then Shift+click to extend)",
+                            )
+                            .clicked()
+                        {
+                            toolbar_clip = Some(text);
+                        }
+                    }
                 }
             });
             ui.horizontal(|ui| {
@@ -184,6 +202,7 @@ impl App {
                     &mut just_started,
                     &d.table,
                     &d.fks,
+                    d.multi,
                 );
                 events.extend(evs);
                 d.selected = sel;
@@ -216,6 +235,7 @@ impl App {
                                     _ => Some((col_name, false)),
                                 };
                                 d.selected = None;
+                                d.multi = None;
                                 d.offset = 0;
                                 d.sort = next_sort.clone();
                                 actions.push(DataAction::Reload {
@@ -232,6 +252,15 @@ impl App {
                                 d.selected = Some((actual, c));
                             }
                         }
+                        d.multi = Some(((r, c), (r, c)));
+                    }
+                    GridEvent::SelectExtend(r, c) => {
+                        let anchor = d
+                            .multi
+                            .map(|(a, _)| a)
+                            .or(d.selected.map(|_| (r, c)))
+                            .unwrap_or((r, c));
+                        d.multi = Some((anchor, (r, c)));
                     }
                     GridEvent::EditStart(r, c) => {
                         if let Some(grid) = &d.grid {
@@ -321,6 +350,16 @@ impl App {
                             }
                         }
                     }
+                    GridEvent::OpenCellMenu(r, c, pos) => {
+                        if let Some(grid) = &d.grid {
+                            let visible = compute_visible(grid, &find_lower);
+                            if let Some(&actual) = visible.get(r) {
+                                d.selected = Some((actual, c));
+                                d.cell_menu =
+                                    Some((actual, c, pos, std::time::Instant::now()));
+                            }
+                        }
+                    }
                     GridEvent::FollowFk(r, c) => {
                         if let Some(grid) = &d.grid {
                             let visible = compute_visible(grid, &find_lower);
@@ -343,7 +382,7 @@ impl App {
                     }
                 }
             }
-            if let Some(text) = clipboard {
+            if let Some(text) = clipboard.or(toolbar_clip) {
                 d_status = Some(format!("copied: {}", truncate(&text, 60)));
                 ui.ctx().copy_text(text);
             }
@@ -519,6 +558,135 @@ impl App {
             show_cell_viewer(self, ctx, conn_id, r, c);
         }
 
+        // Manual cell context menu (floating Area).
+        let menu_state = self.sessions.get(conn_id).and_then(|s| {
+            s.data
+                .cell_menu
+                .map(|(r, c, pos, opened)| (r, c, pos, opened, s.data.fks.clone()))
+        });
+        if let Some((r, c, pos, opened, fks)) = menu_state {
+            let mut pick: Option<CellMenuPick> = None;
+            let (col_name, value_text) = self
+                .sessions
+                .get(conn_id)
+                .and_then(|s| s.data.grid.as_ref())
+                .and_then(|g| {
+                    let name = g.columns.get(c).map(|m| m.name.clone());
+                    let val = g.rows.get(r).and_then(|row| row.get(c)).map(cell_text);
+                    name.zip(val)
+                })
+                .unwrap_or_default();
+            let fk = fks.iter().find(|f| f.0 == col_name).cloned();
+
+            egui::Area::new(egui::Id::new(("cell_menu", conn_id, r, c)))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        if ui.button("⤢ View value").clicked() {
+                            pick = Some(CellMenuPick::View);
+                        }
+                        if let Some((_, ref_table, ref_col)) = &fk {
+                            if ui
+                                .button(format!("➜ Go to {} ({} …)", ref_table, ref_col))
+                                .on_hover_text("Open the referenced row")
+                                .clicked()
+                            {
+                                pick = Some(CellMenuPick::FollowFk);
+                            }
+                        }
+                        if ui.button("⧉ Copy value").clicked() {
+                            pick = Some(CellMenuPick::Copy);
+                        }
+                        if ui.button("Set NULL").clicked() {
+                            pick = Some(CellMenuPick::SetNull);
+                        }
+                        ui.separator();
+                        if ui
+                            .button(
+                                egui::RichText::new("Delete row…")
+                                    .color(egui::Color32::LIGHT_RED),
+                            )
+                            .clicked()
+                        {
+                            pick = Some(CellMenuPick::Delete);
+                        }
+                    });
+                });
+
+            // Dismiss on a click that did not land on the menu (but only
+            // after the opening click has settled), or Esc.
+            let menu_hovered = ctx
+                .read_response(egui::Id::new(("cell_menu", conn_id, r, c)))
+                .map(|r| r.hovered())
+                .unwrap_or(false);
+            let settled = opened.elapsed() > std::time::Duration::from_millis(150);
+            let dismiss =
+                settled && ctx.input(|i| i.pointer.any_click()) && !menu_hovered;
+            let esc = settled && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if pick.is_none() && (dismiss || esc) {
+                if let Some(state) = self.sessions.get_mut(conn_id) {
+                    state.data.cell_menu = None;
+                }
+            }
+
+            match pick {
+                Some(CellMenuPick::View) => {
+                    if let Some(state) = self.sessions.get_mut(conn_id) {
+                        state.data.cell_view = Some((r, c));
+                        state.data.cell_menu = None;
+                    }
+                }
+                Some(CellMenuPick::FollowFk) => {
+                    if let Some((_, ref_table, ref_col)) = fk {
+                        if value_text != "NULL" {
+                            let filter = format!(
+                                "{} = {}",
+                                mff_core::sqlgen::quote_ident(&ref_col),
+                                mff_core::sqlgen::quote_string(&value_text)
+                            );
+                            if let Some(state) = self.sessions.get_mut(conn_id) {
+                                state.data.cell_menu = None;
+                            }
+                            session_view::open_data_filtered(
+                                self,
+                                conn_id,
+                                ref_table.clone(),
+                                Some(filter),
+                            );
+                            self.status =
+                                format!("following {} → {}.{}", ref_col, ref_table, ref_col);
+                        } else {
+                            if let Some(state) = self.sessions.get_mut(conn_id) {
+                                state.data.cell_menu = None;
+                            }
+                            self.status = "NULL has nothing to follow".into();
+                        }
+                    }
+                }
+                Some(CellMenuPick::Copy) => {
+                    ctx.copy_text(value_text.clone());
+                    self.status = format!("copied: {}", truncate(&value_text, 60));
+                    if let Some(state) = self.sessions.get_mut(conn_id) {
+                        state.data.cell_menu = None;
+                    }
+                }
+                Some(CellMenuPick::SetNull) => {
+                    if let Some(state) = self.sessions.get_mut(conn_id) {
+                        state.data.cell_menu = None;
+                    }
+                    self.apply_cell_edit(conn_id, r, c, "NULL");
+                }
+                Some(CellMenuPick::Delete) => {
+                    if let Some(state) = self.sessions.get_mut(conn_id) {
+                        state.data.cell_menu = None;
+                        state.data.confirm_delete_row = Some(r);
+                    }
+                }
+                None => {}
+            }
+        }
+
         // "Insert row" dialog (own window).
         if self
             .sessions
@@ -634,6 +802,15 @@ fn display_row(visible: &[usize], display: usize) -> usize {
     visible.get(display).copied().unwrap_or(display)
 }
 
+/// What the user picked from the manual cell context menu.
+enum CellMenuPick {
+    View,
+    FollowFk,
+    Copy,
+    SetNull,
+    Delete,
+}
+
 /// Rows to show: everything, or only rows where any cell (or a column
 /// name) contains the find text.
 fn compute_visible(grid: &Grid, find_lower: &str) -> Vec<usize> {
@@ -669,6 +846,66 @@ enum GridEvent {
     CopyRowInsert(usize),
     /// Cell context menu: jump to the referenced row.
     FollowFk(usize, usize),
+    /// Manual context menu requested for a cell (pointer position).
+    OpenCellMenu(usize, usize, egui::Pos2),
+    /// Shift+click: extend the multi-cell selection to this cell.
+    SelectExtend(usize, usize),
+}
+
+/// Normalize a selection rectangle from (anchor, focus) into
+/// (min_row, min_col, max_row, max_col) in display coordinates.
+fn selection_rect(multi: Option<((usize, usize), (usize, usize))>) -> Option<(usize, usize, usize, usize)> {
+    let ((ar, ac), (fr, fc)) = multi?;
+    Some((
+        ar.min(fr),
+        ac.min(fc),
+        ar.max(fr),
+        ac.max(fc),
+    ))
+}
+
+/// (rows, cols) spanned by the current multi-selection.
+fn selection_size(multi: Option<((usize, usize), (usize, usize))>) -> (usize, usize) {
+    match selection_rect(multi) {
+        Some((r0, c0, r1, c1)) => (r1 - r0 + 1, c1 - c0 + 1),
+        None => (0, 0),
+    }
+}
+
+/// TSV (with a header line) of the selected rectangle; `None` when the
+/// selection is empty or single-cell (Ctrl+C copies just that value).
+fn selection_clipboard(
+    grid: &Grid,
+    visible: &[usize],
+    multi: Option<((usize, usize), (usize, usize))>,
+) -> Option<String> {
+    let (r0, c0, r1, c1) = selection_rect(multi)?;
+    let (nrows, ncols) = (r1 - r0 + 1, c1 - c0 + 1);
+    if nrows * ncols <= 1 {
+        return None;
+    }
+    let mut out = String::new();
+    out.push_str(
+        &grid.columns[c0..=c1]
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>()
+            .join("\t"),
+    );
+    for di in r0..=r1 {
+        let Some(&r) = visible.get(di) else {
+            continue;
+        };
+        out.push('\n');
+        out.push_str(
+            &grid.rows[r][c0..=c1]
+                .iter()
+                .map(cell_text)
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+    }
+    Some(out)
 }
 
 /// Render the editable data grid. Returns the events of this frame.
@@ -685,6 +922,7 @@ fn render_data_grid(
     just_started: &mut bool,
     table: &str,
     fks: &[(String, String, String)],
+    multi: Option<((usize, usize), (usize, usize))>,
 ) -> Vec<GridEvent> {
     use egui_extras::{Column, TableBuilder};
 
@@ -827,49 +1065,43 @@ fn render_data_grid(
                                 .color(egui::Color32::from_rgb(170, 130, 255)),
                             Cell::Text(_) => egui::RichText::new(text),
                         };
-                        let resp = ui
-                            .add(egui::Label::new(rich).sense(egui::Sense::click()))
+                        // The Label's rect only covers the text; union it
+                        // with a full-cell hit area so clicks anywhere in
+                        // the cell (including right-clicks) register.
+                        let label_resp =
+                            ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+                        let hit = ui.interact(
+                            ui.max_rect(),
+                            ui.id().with(("cell_hit", di, c)),
+                            egui::Sense::click(),
+                        );
+                        let resp = label_resp
+                            .union(hit)
                             .on_hover_text("double-click to edit · right-click for more");
                         if resp.clicked() {
-                            events.push(GridEvent::Select(di, c));
+                            if ui.input(|i| i.modifiers.shift) {
+                                events.push(GridEvent::SelectExtend(di, c));
+                            } else {
+                                events.push(GridEvent::Select(di, c));
+                            }
                         }
                         if resp.double_clicked() {
                             events.push(GridEvent::EditStart(di, c));
                         }
-                        resp.context_menu(|ui| {
-                            if ui.button("⤢ View value").clicked() {
-                                ui.close();
-                                events.push(GridEvent::ViewCell(di, c));
-                            }
-                            // Jump to the row this FK points at.
-                            if let Some((_, ref_table, ref_col)) =
-                                fks.iter().find(|f| f.0 == grid.columns[c].name)
-                            {
-                                if ui
-                                    .button(format!("➜ Go to {} ({} …)", ref_table, ref_col))
-                                    .on_hover_text("Open the referenced row")
-                                    .clicked()
-                                {
-                                    ui.close();
-                                    events.push(GridEvent::FollowFk(di, c));
-                                }
-                            }
-                            if ui.button("Set NULL").clicked() {
-                                ui.close();
-                                events.push(GridEvent::SetNull(di, c));
-                            }
-                            ui.separator();
-                            if ui
-                                .button(
-                                    egui::RichText::new("Delete row…")
-                                        .color(egui::Color32::LIGHT_RED),
-                                )
-                                .clicked()
-                            {
-                                ui.close();
-                                events.push(GridEvent::DeleteRow(di));
-                            }
-                        });
+                        // Manual context menu: egui's Popup-based
+                        // resp.context_menu() does not open inside
+                        // TableBuilder bodies (resp.hovered() is false
+                        // there), so detect the right-click by rect
+                        // containment and draw the menu as a floating
+                        // Area afterwards.
+                        let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                        let over_cell = pointer_pos
+                            .map(|p| resp.rect.contains(p))
+                            .unwrap_or(false);
+                        if over_cell && ui.input(|i| i.pointer.secondary_clicked()) {
+                            let pos = pointer_pos.unwrap_or_default();
+                            events.push(GridEvent::OpenCellMenu(di, c, pos));
+                        }
                         if is_sel {
                             ui.painter().rect_stroke(
                                 resp.rect,
@@ -877,6 +1109,16 @@ fn render_data_grid(
                                 egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(90, 160, 255)),
                                 egui::StrokeKind::Inside,
                             );
+                        }
+                        // Tint cells inside the multi-selection rectangle.
+                        if let Some((r0, c0, r1, c1)) = selection_rect(multi) {
+                            if di >= r0 && di <= r1 && c >= c0 && c <= c1 {
+                                ui.painter().rect_filled(
+                                    resp.rect,
+                                    1.0,
+                                    egui::Color32::from_rgba_unmultiplied(90, 160, 255, 45),
+                                );
+                            }
                         }
                     });
                 }
@@ -1086,6 +1328,16 @@ impl App {
         let Some(state) = self.sessions.get(&conn_id) else {
             return;
         };
+        // A multi-cell rectangle is copied with a header line.
+        if let Some(grid) = &state.data.grid {
+            let visible = compute_visible(grid, &state.data.find.to_lowercase());
+            if let Some(text) = selection_clipboard(grid, &visible, state.data.multi) {
+                ctx.copy_text(text.clone());
+                let (rows, cols) = selection_size(state.data.multi);
+                self.status = format!("copied {}×{} cells (with headers)", rows, cols);
+                return;
+            }
+        }
         if let (Some((r, c)), Some(grid)) = (state.data.selected, &state.data.grid) {
             if let Some(row) = grid.rows.get(r) {
                 if let Some(cell) = row.get(c) {

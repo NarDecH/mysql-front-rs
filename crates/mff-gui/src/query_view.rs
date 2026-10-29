@@ -84,9 +84,13 @@ impl App {
         let mut format_clicked = false;
         let mut explain_clicked = false;
         let mut chart_grid: Option<Grid> = None;
+        // Non-empty editor selection → Run executes only the selected SQL.
+        let mut selected_sql: Option<String> = None;
         let elapsed: Option<u128>;
         // Suggestion chosen via Enter/Tab (set before the editor renders).
         let mut key_accept = false;
+        // Find bar events collected while rendering it.
+        let mut close_find = false;
         // Make sure the completion index for the current db is loaded.
         let completion = {
             let st = self.sessions.get(conn_id);
@@ -171,6 +175,58 @@ impl App {
             elapsed = tab.elapsed_ms;
             code = tab.code.clone();
 
+            // Ctrl+F toggles the find/replace bar (query view owns Ctrl+F;
+            // the global object search is Ctrl+Shift+F here).
+            let ctrl_f = ui
+                .ctx()
+                .input(|i| i.key_pressed(Key::F) && i.modifiers.ctrl && !i.modifiers.shift);
+            if ctrl_f {
+                tab.find = match tab.find {
+                    Some(_) => None,
+                    None => Some(FindState::default()),
+                };
+            }
+
+            // ── Find/Replace bar ───────────────────────────────────────
+            let mut find_next_clicked = false;
+            let mut replace_clicked = false;
+            let mut replace_all_clicked = false;
+            if let Some(f) = tab.find.as_mut() {
+                ui.horizontal(|ui| {
+                    ui.weak("Find:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut f.what)
+                            .desired_width(180.0)
+                            .hint_text("search…"),
+                    );
+                    if resp.changed() {
+                        f.from_byte = 0;
+                    }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        find_next_clicked = true;
+                    }
+                    ui.checkbox(&mut f.case_sensitive, "Aa")
+                        .on_hover_text("case sensitive");
+                    if ui.button("⤵ Next").clicked() {
+                        find_next_clicked = true;
+                    }
+                    ui.separator();
+                    ui.weak("Replace with:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut f.replacement).desired_width(140.0),
+                    );
+                    if ui.button("Replace").clicked() {
+                        replace_clicked = true;
+                    }
+                    if ui.button("All").clicked() {
+                        replace_all_clicked = true;
+                    }
+                    if ui.button("✕").on_hover_text("close find bar").clicked() {
+                        close_find = true;
+                    }
+                });
+            }
+
             // While the popup is open, capture the navigation keys before
             // the editor turns them into caret moves / newlines.
             if tab.suggest.open && tab.suggest.had_focus {
@@ -205,6 +261,101 @@ impl App {
                 tab.code = edited;
             }
             code = tab.code.clone();
+            // Ctrl+Space force-opens the popup even for a short prefix and
+            // cancels a previous Escape dismissal.
+            let ctrl_space = ui.ctx().input(|i| {
+                i.key_pressed(egui::Key::Space) && i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt
+            });
+            if ctrl_space {
+                tab.suggest.dismissed_word = None;
+            }
+
+            // Capture the selection for "run selection" (char indices).
+            if let Some(st) = egui::TextEdit::load_state(ui.ctx(), editor_resp.id) {
+                if let Some(range) = st.cursor.char_range() {
+                    let a = range.secondary.index.min(range.primary.index);
+                    let b = range.primary.index.max(range.secondary.index);
+                    if a != b {
+                        let (ba, bb) = char_span(&tab.code, a, b);
+                        let s = tab.code[ba..bb].trim().to_string();
+                        if !s.is_empty() {
+                            selected_sql = Some(s);
+                        }
+                    }
+                }
+            }
+
+            // ── Find/Replace actions (need the editor id) ──────────────
+            let find_params = tab
+                .find
+                .as_ref()
+                .map(|f| (f.what.clone(), f.replacement.clone(), f.case_sensitive));
+            if let Some((what, repl, case)) = find_params {
+                if find_next_clicked || replace_clicked {
+                    let mut from = tab.find.as_ref().map(|f| f.from_byte).unwrap_or(0);
+                    if replace_clicked {
+                        // Replace the current selection when it is a match.
+                        if let Some(st) = egui::TextEdit::load_state(ui.ctx(), editor_resp.id) {
+                            if let Some(range) = st.cursor.char_range() {
+                                let a = range.secondary.index.min(range.primary.index);
+                                let b = range.primary.index.max(range.secondary.index);
+                                let (ba, bb) = char_span(&tab.code, a, b);
+                                let sel = &tab.code[ba..bb];
+                                let is_match = if case {
+                                    sel == what
+                                } else {
+                                    sel.eq_ignore_ascii_case(&what)
+                                };
+                                if is_match {
+                                    tab.code.replace_range(ba..bb, &repl);
+                                    from = ba + repl.len();
+                                }
+                            }
+                        }
+                    }
+                    match find_match(&tab.code, from, &what, case) {
+                        Some((s, e)) => {
+                            let ca = tab.code[..s].chars().count();
+                            let ce = tab.code[..e].chars().count();
+                            if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), editor_resp.id)
+                            {
+                                st.cursor.set_char_range(Some(
+                                    egui::text::CCursorRange::two(
+                                        egui::text::CCursor::new(ca),
+                                        egui::text::CCursor::new(ce),
+                                    ),
+                                ));
+                                egui::TextEdit::store_state(ui.ctx(), editor_resp.id, st);
+                            }
+                            let next_from = if e < tab.code.len() { e } else { 0 };
+                            if let Some(f) = tab.find.as_mut() {
+                                f.from_byte = next_from;
+                            }
+                        }
+                        None => {
+                            if let Some(f) = tab.find.as_mut() {
+                                f.from_byte = 0;
+                            }
+                            self.status = format!("\"{what}\" not found");
+                        }
+                    }
+                }
+                if replace_all_clicked {
+                    let (new_code, n) = replace_all(&tab.code, &what, &repl, case);
+                    tab.code = new_code;
+                    if let Some(f) = tab.find.as_mut() {
+                        f.from_byte = 0;
+                    }
+                    self.status = if n == 0 {
+                        format!("\"{what}\" not found")
+                    } else {
+                        format!("replaced {n} occurrence(s)")
+                    };
+                }
+            }
+            if close_find {
+                tab.find = None;
+            }
 
             // ── Suggestion logic ───────────────────────────────────────
             let focused = editor_resp.has_focus();
@@ -257,12 +408,13 @@ impl App {
                     if !focused || tab.suggest.items.is_empty() {
                         tab.suggest.open = false;
                     }
-                // Open while typing (2+ chars) or right after a dot, where
-                // every column of the table applies.
+                // Open while typing (2+ chars), right after a dot (every
+                // column of the table applies) or via Ctrl+Space.
                 } else if focused
                     && !items.is_empty()
-                    && (word.chars().count() >= 2 || sctx.dotted)
-                    && tab.suggest.dismissed_word.as_deref() != Some(word_lower.as_str())
+                    && (word.chars().count() >= 2 || sctx.dotted || ctrl_space)
+                    && (ctrl_space
+                        || tab.suggest.dismissed_word.as_deref() != Some(word_lower.as_str()))
                 {
                     tab.suggest.open = true;
                     tab.suggest.items = items;
@@ -380,7 +532,9 @@ impl App {
             }
         }
         if (run_clicked || ctrl_enter) && !running {
-            self.run_query(conn_id, active, code, false);
+            // With a non-empty selection only that SQL is executed.
+            let sql = selected_sql.unwrap_or_else(|| code.clone());
+            self.run_query(conn_id, active, sql, false);
         }
 
         // ── Results ────────────────────────────────────────────────────
@@ -501,6 +655,80 @@ pub struct SuggestState {
     pub dismissed_word: Option<String>,
     /// Whether the editor had keyboard focus on the previous frame.
     pub had_focus: bool,
+}
+
+/// Find/Replace bar state of one query tab's editor.
+#[derive(Default)]
+pub struct FindState {
+    pub what: String,
+    pub replacement: String,
+    pub case_sensitive: bool,
+    /// Byte offset the next search starts from (code length on wrap).
+    pub from_byte: usize,
+}
+
+/// Convert a character-index span (a, b) into a byte-index span over
+/// `code`, clamped to the text.
+fn char_span(code: &str, a: usize, b: usize) -> (usize, usize) {
+    let mut byte_a = code.len();
+    let mut byte_b = code.len();
+    for (i, (bi, _)) in code.char_indices().enumerate() {
+        if i == a {
+            byte_a = bi;
+        }
+        if i == b {
+            byte_b = bi;
+            break;
+        }
+    }
+    (byte_a.min(byte_b), byte_b.max(byte_a))
+}
+
+/// Find the next occurrence of `what` in `code` starting at byte offset
+/// `from`, wrapping once; returns the byte range of the match.
+fn find_match(code: &str, from: usize, what: &str, case_sensitive: bool) -> Option<(usize, usize)> {
+    if what.is_empty() {
+        return None;
+    }
+    let (hay, needle) = if case_sensitive {
+        (code.to_string(), what.to_string())
+    } else {
+        (code.to_lowercase(), what.to_lowercase())
+    };
+    let from = from.min(hay.len());
+    if let Some(pos) = hay[from..].find(&needle) {
+        return Some((from + pos, from + pos + needle.len()));
+    }
+    // wrap around
+    hay[..from].find(&needle).map(|pos| (pos, pos + needle.len()))
+}
+
+/// Replace every occurrence; returns (new code, count).
+fn replace_all(code: &str, what: &str, with: &str, case_sensitive: bool) -> (String, usize) {
+    if what.is_empty() {
+        return (code.to_string(), 0);
+    }
+    let (hay, needle) = if case_sensitive {
+        (code.to_string(), what.to_string())
+    } else {
+        (code.to_lowercase(), what.to_lowercase())
+    };
+    let mut out = String::with_capacity(code.len());
+    let mut last = 0;
+    let mut count = 0;
+    while let Some(pos) = hay[last..].find(&needle) {
+        let start = last + pos;
+        let end = start + needle.len();
+        out.push_str(&code[last..start]);
+        out.push_str(with);
+        last = end;
+        count += 1;
+    }
+    if count == 0 {
+        return (code.to_string(), 0);
+    }
+    out.push_str(&code[last..]);
+    (out, count)
 }
 
 /// Replace the word under the caret with the accepted suggestion and

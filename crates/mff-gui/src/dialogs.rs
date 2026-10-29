@@ -84,7 +84,17 @@ impl ExportDlg {
 impl App {
     pub fn open_conn_editor(&mut self, editing: Option<&mff_core::Connection>) {
         self.conn_edit = Some(match editing {
-            Some(c) => ConnEditor::from(c.clone()),
+            Some(c) => {
+                let mut conn = c.clone();
+                // Keychain-resolved secrets, so Test works while editing.
+                if conn.password_in_keychain && conn.password.is_empty() {
+                    let _ = conn.load_password_keychain();
+                }
+                if conn.ssh_password_in_keychain && conn.ssh_password.is_empty() {
+                    let _ = conn.load_ssh_password_keychain();
+                }
+                ConnEditor::from(conn)
+            }
             None => ConnEditor::new(),
         });
     }
@@ -246,14 +256,24 @@ impl App {
                             );
                             ui.end_row();
                             ui.label("SSH password");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut editor.conn.ssh_password)
-                                    .password(true)
-                                    .desired_width(240.0),
-                            )
-                            .on_hover_text(
-                                "SSH password, or the passphrase when a key file is set",
-                            );
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut editor.conn.ssh_password)
+                                        .password(true)
+                                        .desired_width(240.0),
+                                )
+                                .on_hover_text(
+                                    "SSH password, or the passphrase when a key file is set",
+                                );
+                                ui.checkbox(
+                                    &mut editor.conn.ssh_password_in_keychain,
+                                    "store in OS keychain",
+                                )
+                                .on_hover_text(
+                                    "The SSH password / key passphrase is kept in \
+                                     Windows Credential Manager instead of connections.json",
+                                );
+                            });
                             ui.end_row();
                             ui.label("SSH key file");
                             ui.horizontal(|ui| {
@@ -341,6 +361,16 @@ impl App {
                     conn.password = String::new();
                 } else {
                     conn.delete_password_keychain();
+                }
+                if conn.ssh_password_in_keychain {
+                    if let Err(e) = conn.store_ssh_password_keychain() {
+                        editor.error = Some(e.to_string());
+                        self.conn_edit = Some(editor);
+                        return;
+                    }
+                    conn.ssh_password = String::new();
+                } else {
+                    conn.delete_ssh_password_keychain();
                 }
                 match save_connection(&mut self.registry, conn.clone()) {
                     Ok(()) => self.status = format!("connection “{}” saved", conn.name),

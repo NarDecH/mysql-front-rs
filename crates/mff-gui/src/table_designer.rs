@@ -273,6 +273,160 @@ impl App {
                 }
                 ui.separator();
 
+                // ── Indexes ────────────────────────────────────────────
+                ui.strong(format!("Indexes ({})", d.design.indexes.len()));
+                ui.add_space(2.0);
+                {
+                    const IDX_KINDS: &[&str] = &["INDEX", "UNIQUE", "FULLTEXT", "SPATIAL"];
+                    let n = d.design.indexes.len();
+                    let mut remove: Option<usize> = None;
+                    for i in 0..n {
+                        let is_new = d.design.indexes[i].orig_name.is_none();
+                        ui.horizontal(|ui| {
+                            if is_new {
+                                ui.colored_label(egui::Color32::from_rgb(120, 200, 120), "＋");
+                            }
+                            let mut idx = d.design.indexes[i].clone();
+                            ui.add(
+                                egui::TextEdit::singleline(&mut idx.name)
+                                    .desired_width(120.0)
+                                    .hint_text("index name"),
+                            );
+                            egui::ComboBox::from_id_salt(("designer_idx_kind", i))
+                                .selected_text(idx.kind.as_str())
+                                .show_ui(ui, |ui| {
+                                    for k in IDX_KINDS {
+                                        ui.selectable_value(&mut idx.kind, k.to_string(), *k);
+                                    }
+                                });
+                            ui.add(
+                                egui::TextEdit::singleline(&mut idx.columns)
+                                    .desired_width(220.0)
+                                    .hint_text("col1, col2(191)"),
+                            );
+                            d.design.indexes[i] = idx;
+                            if ui
+                                .small_button(
+                                    egui::RichText::new("✕").color(egui::Color32::LIGHT_RED),
+                                )
+                                .on_hover_text(if is_new {
+                                    "remove this new index"
+                                } else {
+                                    "DROP this index"
+                                })
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove {
+                        d.design.indexes.remove(i);
+                    }
+                }
+                if ui.button("＋ Add index").clicked() {
+                    d.design.indexes.push(mff_core::designer::IdxSpec {
+                        orig_name: None,
+                        name: String::new(),
+                        kind: "INDEX".into(),
+                        columns: String::new(),
+                    });
+                }
+                ui.separator();
+
+                // ── Foreign keys ───────────────────────────────────────
+                ui.strong(format!("Foreign keys ({})", d.design.foreign_keys.len()));
+                ui.add_space(2.0);
+                {
+                    const ACTIONS: &[&str] =
+                        &["RESTRICT", "CASCADE", "SET NULL", "NO ACTION"];
+                    let n = d.design.foreign_keys.len();
+                    let mut remove: Option<usize> = None;
+                    for i in 0..n {
+                        let is_new = d.design.foreign_keys[i].orig_name.is_none();
+                        ui.horizontal(|ui| {
+                            if is_new {
+                                ui.colored_label(egui::Color32::from_rgb(120, 200, 120), "＋");
+                            }
+                            let mut fk = d.design.foreign_keys[i].clone();
+                            ui.add(
+                                egui::TextEdit::singleline(&mut fk.name)
+                                    .desired_width(110.0)
+                                    .hint_text("constraint name"),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut fk.columns)
+                                    .desired_width(90.0)
+                                    .hint_text("columns"),
+                            );
+                            ui.weak("→");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut fk.ref_table)
+                                    .desired_width(90.0)
+                                    .hint_text("ref table"),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut fk.ref_columns)
+                                    .desired_width(70.0)
+                                    .hint_text("ref cols"),
+                            );
+                            ui.weak("ON DELETE");
+                            egui::ComboBox::from_id_salt(("designer_fk_del", i))
+                                .selected_text(fk.on_delete.as_str())
+                                .show_ui(ui, |ui| {
+                                    for a in ACTIONS {
+                                        ui.selectable_value(
+                                            &mut fk.on_delete,
+                                            a.to_string(),
+                                            *a,
+                                        );
+                                    }
+                                });
+                            ui.weak("ON UPDATE");
+                            egui::ComboBox::from_id_salt(("designer_fk_upd", i))
+                                .selected_text(fk.on_update.as_str())
+                                .show_ui(ui, |ui| {
+                                    for a in ACTIONS {
+                                        ui.selectable_value(
+                                            &mut fk.on_update,
+                                            a.to_string(),
+                                            *a,
+                                        );
+                                    }
+                                });
+                            d.design.foreign_keys[i] = fk;
+                            if ui
+                                .small_button(
+                                    egui::RichText::new("✕").color(egui::Color32::LIGHT_RED),
+                                )
+                                .on_hover_text(if is_new {
+                                    "remove this new foreign key"
+                                } else {
+                                    "DROP this foreign key"
+                                })
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove {
+                        d.design.foreign_keys.remove(i);
+                    }
+                }
+                if ui.button("＋ Add foreign key").clicked() {
+                    d.design.foreign_keys.push(mff_core::designer::FkSpec {
+                        orig_name: None,
+                        name: String::new(),
+                        columns: String::new(),
+                        ref_table: String::new(),
+                        ref_columns: String::new(),
+                        on_delete: "RESTRICT".into(),
+                        on_update: "RESTRICT".into(),
+                    });
+                }
+                ui.separator();
+
                 // ── Live ALTER preview ─────────────────────────────────
                 match d.preview() {
                     Ok(stmts) => {

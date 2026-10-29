@@ -16,8 +16,10 @@ public class Win {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int nCmdShow);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }
 "@
@@ -83,9 +85,25 @@ switch ($Cmd) {
         [Win]::SetCursorPos($x, $y) | Out-Null
         Start-Sleep -Milliseconds 120
         [Win]::mouse_event(0x0008, 0, 0, 0, [UIntPtr]::Zero)  # right down
+        Start-Sleep -Milliseconds 120
         [Win]::mouse_event(0x0010, 0, 0, 0, [UIntPtr]::Zero)  # right up
         Start-Sleep -Milliseconds 450
         Write-Output "right-clicked $x $y"
+    }
+    "shiftclick" {
+        Show-Window | Out-Null
+        $x = [int]$Arg1; $y = [int]$Arg2
+        [Win]::SetCursorPos($x, $y) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [Win]::keybd_event(0x10, 0, 0, [UIntPtr]::Zero)       # shift down
+        Start-Sleep -Milliseconds 80
+        [Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)  # left down
+        Start-Sleep -Milliseconds 80
+        [Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)  # left up
+        Start-Sleep -Milliseconds 80
+        [Win]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero)       # shift up
+        Start-Sleep -Milliseconds 400
+        Write-Output "shift-clicked $x $y"
     }
     "type" {
         Show-Window | Out-Null
@@ -104,6 +122,15 @@ switch ($Cmd) {
         [Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)  # left up
         Start-Sleep -Milliseconds 250
         Write-Output "dragged"
+    }
+    "maximize" {
+        Show-Window | Out-Null
+        $p = Get-Process mysql-front-rs -ErrorAction Stop |
+            Where-Object { $_.MainWindowHandle -ne 0 } |
+            Select-Object -First 1
+        [Win]::ShowWindow($p.MainWindowHandle, 3) | Out-Null   # SW_MAXIMIZE
+        Start-Sleep -Milliseconds 400
+        Write-Output "maximized"
     }
     "key" {
         Show-Window | Out-Null

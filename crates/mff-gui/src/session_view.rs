@@ -95,6 +95,9 @@ pub struct DataState {
     pub filter_applied: String,
     pub sort: Option<(String, bool)>,
     pub selected: Option<(usize, usize)>,
+    /// Multi-cell selection rectangle: (anchor, focus) in
+    /// (display-row, column) — extended with Shift+click.
+    pub multi: Option<((usize, usize), (usize, usize))>,
     pub loading: bool,
     pub error: Option<String>,
     pub export_open: bool,
@@ -112,6 +115,10 @@ pub struct DataState {
     pub confirm_delete_row: Option<usize>,
     /// Cell shown in the value viewer window (row, col).
     pub cell_view: Option<(usize, usize)>,
+    /// Open manual context menu for one grid cell (grid row, column,
+    /// opened-at) — the timestamp guards against the opening click
+    /// dismissing the menu on its first frame.
+    pub cell_menu: Option<(usize, usize, egui::Pos2, std::time::Instant)>,
     /// The "insert row" dialog, if open.
     pub insert_dlg: Option<crate::insert_row::InsertRowDialog>,
     /// Set while the schema for the insert dialog is still loading.
@@ -130,6 +137,7 @@ impl Default for DataState {
             filter_applied: String::new(),
             sort: None,
             selected: None,
+            multi: None,
             loading: false,
             error: None,
             export_open: false,
@@ -140,6 +148,7 @@ impl Default for DataState {
             find: String::new(),
             confirm_delete_row: None,
             cell_view: None,
+            cell_menu: None,
             insert_dlg: None,
             insert_pending: false,
         }
@@ -173,6 +182,8 @@ pub struct QueryTab {
     pub elapsed_ms: Option<u128>,
     /// SQL autocomplete popup state for this tab's editor.
     pub suggest: crate::query_view::SuggestState,
+    /// Find/Replace bar (None = hidden).
+    pub find: Option<crate::query_view::FindState>,
 }
 
 impl QueryTab {
@@ -184,6 +195,7 @@ impl QueryTab {
             running: false,
             elapsed_ms: None,
             suggest: Default::default(),
+            find: None,
         }
     }
 }
@@ -193,6 +205,31 @@ pub struct InfoState {
     pub variables: Option<Vec<(String, String)>>,
     pub filter: String,
     pub loading: bool,
+}
+
+/// Server overview stats (name → value).
+#[derive(Default)]
+pub struct ServerStats {
+    pub rows: Option<Vec<(String, String)>>,
+    pub loading: bool,
+}
+
+/// GRANT editor state for one account.
+pub struct GrantsEditor {
+    pub user: String,
+    pub host: String,
+    pub selected: std::collections::HashSet<String>,
+    pub current_grants: Vec<String>,
+    pub running: bool,
+    pub error: Option<String>,
+}
+
+impl GrantsEditor {
+    pub const PRIVILEGES: &[&str] = &[
+        "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES",
+        "CREATE VIEW", "SHOW VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "EXECUTE", "EVENT",
+        "TRIGGER", "GRANT OPTION",
+    ];
 }
 
 /// "Server" tab state: process list and user accounts.
@@ -206,6 +243,8 @@ pub struct ServerState {
     pub confirm_kill: Option<u64>,
     pub confirm_drop_user: Option<(String, String)>,
     pub error: Option<String>,
+    pub stats: ServerStats,
+    pub grants_editor: Option<GrantsEditor>,
 }
 
 /// CREATE USER dialog state.
@@ -284,6 +323,12 @@ impl App {
         // set — resolve it here so the worker thread sees the secret.
         if conn.password_in_keychain && conn.password.is_empty() {
             if let Err(e) = conn.load_password_keychain() {
+                self.status = format!("keychain: {e}");
+                return;
+            }
+        }
+        if conn.ssh_password_in_keychain && conn.ssh_password.is_empty() {
+            if let Err(e) = conn.load_ssh_password_keychain() {
                 self.status = format!("keychain: {e}");
                 return;
             }
@@ -960,6 +1005,149 @@ impl App {
                     }
                 }
             }
+            UiMsg::SchemaDiffDone { conn_id, result } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                }
+                if let Some(dlg) = self.schemadiff_dlg.as_mut() {
+                    dlg.running = false;
+                }
+                match result {
+                    Ok(diff) => {
+                        self.status = format!("schema diff: {} ALTER(s)", diff.alter.len());
+                        self.schemadiff_result =
+                            Some(crate::schemadiff_dlg::SchemaDiffResultUi { diff });
+                        self.schemadiff_dlg = None;
+                    }
+                    Err(e) => {
+                        self.status = format!("schema diff failed: {e}");
+                        if let Some(dlg) = self.schemadiff_dlg.as_mut() {
+                            dlg.message = Some(format!("✗ {e}"));
+                        }
+                    }
+                }
+            }
+            UiMsg::SchemaDiffApplied {
+                conn_id,
+                target,
+                result,
+            } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                }
+                match result {
+                    Ok(_) => self.status = format!("schema applied to {target} ✓"),
+                    Err(e) => self.status = format!("apply failed: {e}"),
+                }
+                let db = self
+                    .sessions
+                    .get(&conn_id)
+                    .map(|s| s.current_db.clone())
+                    .unwrap_or_default();
+                self.load_objects(&conn_id, db);
+            }
+            UiMsg::SearchDone { conn_id, result } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                }
+                if let Some(dlg) = self.search_dlg.as_mut() {
+                    dlg.running = false;
+                    dlg.done = true;
+                    match result {
+                        Ok(rows) => dlg.results = rows,
+                        Err(e) => dlg.error = Some(e),
+                    }
+                }
+            }
+            UiMsg::GrantsLoaded {
+                conn_id,
+                user,
+                host,
+                result,
+            } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                    match result {
+                        Ok(grants) => {
+                            let editor = crate::session_view::GrantsEditor {
+                                user,
+                                host,
+                                selected: std::collections::HashSet::new(),
+                                current_grants: grants,
+                                running: false,
+                                error: None,
+                            };
+                            state.server.grants_editor = Some(editor);
+                        }
+                        Err(e) => self.status = format!("show grants failed: {e}"),
+                    }
+                }
+            }
+            UiMsg::GrantsApplied { conn_id, result } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                }
+                match &result {
+                    Ok(msg) => {
+                        self.status = msg.clone();
+                        let creds = self
+                            .sessions
+                            .get(&conn_id)
+                            .and_then(|s| s.server.grants_editor.as_ref())
+                            .map(|ed| (ed.user.clone(), ed.host.clone()));
+                        if let Some((user, host)) = creds {
+                            self.load_grants(&conn_id, user, host);
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(state) = self.sessions.get_mut(&conn_id) {
+                            if let Some(ed) = state.server.grants_editor.as_mut() {
+                                ed.running = false;
+                                ed.error = Some(e.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            UiMsg::ServerStatsLoaded { conn_id, result } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                    state.server.stats.loading = false;
+                    match result {
+                        Ok(rows) => state.server.stats.rows = Some(rows),
+                        Err(e) => state.server.error = Some(format!("stats: {e}")),
+                    }
+                }
+            }
+            UiMsg::DefinitionLoaded {
+                conn_id,
+                kind,
+                name,
+                result,
+            } => {
+                if let Some(state) = self.sessions.get_mut(&conn_id) {
+                    state.busy = state.busy.saturating_sub(1);
+                    match result {
+                        Ok(sql) => {
+                            let title = format!("Edit: {name}");
+                            let idx = match state.queries.iter().position(|q| q.title == title) {
+                                Some(i) => i,
+                                None => {
+                                    state.queries.push(QueryTab::new(title));
+                                    state.queries.len() - 1
+                                }
+                            };
+                            state.active_query = idx;
+                            state.view = ActiveView::Query;
+                            if let Some(tab) = state.queries.get_mut(idx) {
+                                tab.code = sql;
+                            }
+                            self.status = format!("{kind} {name} loaded for editing");
+                        }
+                        Err(e) => self.status = format!("load definition failed: {e}"),
+                    }
+                }
+            }
             UiMsg::Status(s) => self.status = s,
             UiMsg::Connected { conn_id, result } => match result {
                 Ok(session) => {
@@ -1238,6 +1426,17 @@ impl App {
                 _ => {}
             }
         }
+        // Ctrl+Shift+F opens the global object search everywhere;
+        // Ctrl+F only outside the query view (there it is Find/Replace).
+        if ctx.input(
+            |i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl && i.modifiers.shift,
+        ) {
+            self.open_search(&conn_id);
+        } else if ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) {
+            if self.sessions.get(&conn_id).map(|s| s.view) != Some(ActiveView::Query) {
+                self.open_search(&conn_id);
+            }
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::T) && i.modifiers.ctrl) {
             if let Some(state) = self.sessions.get_mut(&conn_id) {
                 state
@@ -1336,6 +1535,10 @@ impl App {
                         ui.close();
                         self.open_compare_dialog(&conn_id);
                     }
+                    if ui.button(t(lang, "Diff schema with…")).clicked() {
+                        ui.close();
+                        self.open_schema_diff(&conn_id);
+                    }
                 });
                 if ui.button(t(lang, "⟳ Refresh")).clicked() {
                     self.load_databases(&conn_id);
@@ -1363,10 +1566,13 @@ impl App {
         let mut actions: Vec<TreeAction> = Vec::new();
         let mut open_structure_table: Option<String> = None;
         let mut export_table: Option<String> = None;
+        let mut search_clicked = false;
+        let mut edit_def: Option<(String, String)> = None;
 
         egui::SidePanel::left("object_browser")
             .resizable(true)
             .default_width(250.0)
+            .width_range(180.0..=600.0)
             .show(ctx, |ui| {
                 ui.heading("Objects");
                 ui.add_space(4.0);
@@ -1374,11 +1580,20 @@ impl App {
                     let Some(state) = self.sessions.get_mut(&conn_id) else {
                         return;
                     };
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.tree_filter)
-                            .hint_text("filter…")
-                            .desired_width(ui.available_width()),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.tree_filter)
+                                .hint_text("filter…")
+                                .desired_width(ui.available_width() - 32.0),
+                        );
+                        if ui
+                            .small_button("🔍")
+                            .on_hover_text("Search objects across all databases (Ctrl+F)")
+                            .clicked()
+                        {
+                            search_clicked = true;
+                        }
+                    });
                     ui.add_space(4.0);
                     if state.objects_loading {
                         ui.horizontal(|ui| {
@@ -1538,6 +1753,10 @@ impl App {
                                         ),
                                     ));
                                 }
+                                if ui.button("Edit definition…").clicked() {
+                                    ui.close();
+                                    edit_def = Some(("VIEW".into(), v.name.clone()));
+                                }
                                 if ui.button("Rename").clicked() {
                                     ui.close();
                                     actions.push(TreeAction::StartRename(
@@ -1610,6 +1829,15 @@ impl App {
                                         sql,
                                     ));
                                 }
+                                if ui.button("Edit definition…").clicked() {
+                                    ui.close();
+                                    let kind = if r.kind.eq_ignore_ascii_case("FUNCTION") {
+                                        "FUNCTION"
+                                    } else {
+                                        "PROCEDURE"
+                                    };
+                                    edit_def = Some((kind.into(), r.name.clone()));
+                                }
                                 ui.separator();
                                 if ui.button(egui::RichText::new("Drop…").color(egui::Color32::LIGHT_RED)).clicked() {
                                     ui.close();
@@ -1667,6 +1895,10 @@ impl App {
                                         sql,
                                     ));
                                 }
+                                if ui.button("Edit definition…").clicked() {
+                                    ui.close();
+                                    edit_def = Some(("TRIGGER".into(), t.name.clone()));
+                                }
                                 ui.separator();
                                 if ui.button(egui::RichText::new("Drop…").color(egui::Color32::LIGHT_RED)).clicked() {
                                     ui.close();
@@ -1719,6 +1951,10 @@ impl App {
                                         e.name.clone(),
                                         sql,
                                     ));
+                                }
+                                if ui.button("Edit definition…").clicked() {
+                                    ui.close();
+                                    edit_def = Some(("EVENT".into(), e.name.clone()));
                                 }
                                 ui.separator();
                                 if ui.button(egui::RichText::new("Drop…").color(egui::Color32::LIGHT_RED)).clicked() {
@@ -1815,6 +2051,12 @@ impl App {
             }
         }
 
+        if search_clicked {
+            self.open_search(&conn_id);
+        }
+        if let Some((kind, name)) = edit_def {
+            self.load_definition(&conn_id, kind, name);
+        }
         if let Some(t) = open_structure_table {
             open_structure(self, &conn_id, t);
         }
