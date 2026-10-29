@@ -90,6 +90,7 @@ impl AppState {
     fn roundtrips() {
         let mut st = AppState {
             theme: Some("dark".into()),
+            language: Some("en".into()),
             last_conn: Some("c1".into()),
             connections: HashMap::new(),
         };

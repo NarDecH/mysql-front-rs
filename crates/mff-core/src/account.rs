@@ -108,6 +108,9 @@ pub struct Connection {
     /// Store the MySQL password in the OS keychain instead of this file.
     #[serde(default)]
     pub password_in_keychain: bool,
+    /// Store the SSH password / key passphrase in the OS keychain.
+    #[serde(default)]
+    pub ssh_password_in_keychain: bool,
 }
 
 fn default_ssh_port() -> u16 {
@@ -146,6 +149,7 @@ impl Default for Connection {
             ssh_password: String::new(),
             ssh_key_path: None,
             password_in_keychain: false,
+            ssh_password_in_keychain: false,
         }
     }
 }
@@ -174,6 +178,38 @@ impl Connection {
     /// Remove the keychain entry (called when the flag is turned off).
     pub fn delete_password_keychain(&self) {
         if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, &self.id) {
+            let _ = entry.delete_credential();
+        }
+    }
+
+    /// Keychain account name for the SSH password of this connection.
+    fn ssh_keychain_account(&self) -> String {
+        format!("{}#ssh", self.id)
+    }
+
+    /// Write the SSH password / key passphrase into the OS keychain.
+    pub fn store_ssh_password_keychain(&self) -> Result<()> {
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &self.ssh_keychain_account())
+            .map_err(|e| MffError::Other(format!("keychain: {e}")))?;
+        entry
+            .set_password(&self.ssh_password)
+            .map_err(|e| MffError::Other(format!("keychain: {e}")))?;
+        Ok(())
+    }
+
+    /// Read the SSH password / key passphrase from the OS keychain.
+    pub fn load_ssh_password_keychain(&mut self) -> Result<()> {
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &self.ssh_keychain_account())
+            .map_err(|e| MffError::Other(format!("keychain: {e}")))?;
+        self.ssh_password = entry
+            .get_password()
+            .map_err(|e| MffError::Other(format!("keychain: {e}")))?;
+        Ok(())
+    }
+
+    /// Remove the SSH keychain entry (called when the flag is turned off).
+    pub fn delete_ssh_password_keychain(&self) {
+        if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, &self.ssh_keychain_account()) {
             let _ = entry.delete_credential();
         }
     }

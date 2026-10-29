@@ -24,6 +24,7 @@ pub mod appstate;
 pub mod designer;
 pub mod compare;
 pub mod edit;
+pub mod schemadiff;
 pub mod error;
 pub mod export;
 pub mod import;

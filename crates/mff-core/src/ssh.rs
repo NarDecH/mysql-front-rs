@@ -93,9 +93,27 @@ async fn relay(
 
     let config = Arc::new(russh::client::Config::default());
     let addr = (t.ssh_host.clone(), t.ssh_port);
-    let mut handle = russh::client::connect(config, addr, Handler)
-        .await
-        .map_err(|e| format!("ssh connect: {e}"))?;
+    let mut handle = match russh::client::connect(
+        config,
+        addr.clone(),
+        Handler {
+            host: t.ssh_host.clone(),
+            port: t.ssh_port,
+        },
+    )
+    .await
+    {
+        Ok(h) => h,
+        Err(russh::Error::UnknownKey) => {
+            return Err(format!(
+                "ssh host key for {}:{} changed or could not be verified — \
+                 if the server really changed, delete its line in \
+                 ~/.ssh/known_hosts and reconnect",
+                addr.0, addr.1
+            ));
+        }
+        Err(e) => return Err(format!("ssh connect: {e}")),
+    };
 
     // Authenticate: key file when given, otherwise password.
     if let Some(path) = &t.ssh_key_path {
@@ -164,17 +182,81 @@ async fn relay(
     }
 }
 
-/// Accepts every host key (the GUI user already chose to connect;
-/// host-key pinning can be added later).
-struct Handler;
+/// Trust-on-first-use host key verification against the user's standard
+/// `~/.ssh/known_hosts`: known keys must match, unknown keys are learned,
+/// a changed key refuses the connection (possible man-in-the-middle).
+struct Handler {
+    host: String,
+    port: u16,
+}
+
+/// The user's OpenSSH known_hosts file.
+fn known_hosts_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".ssh").join("known_hosts"))
+}
 
 impl russh::client::Handler for Handler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKeyOrCertificate,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        Ok(true)
+        let russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } = server_public_key
+        else {
+            // Certificates are not pinned; accept.
+            return Ok(true);
+        };
+        let Some(path) = known_hosts_path() else {
+            return Ok(true);
+        };
+        match russh::keys::check_known_hosts_path(&self.host, self.port, key, &path) {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                // First contact: record the key (TOFU) and continue.
+                let _ = russh::keys::known_hosts::learn_known_hosts_path(
+                    &self.host,
+                    self.port,
+                    key,
+                    &path,
+                );
+                Ok(true)
+            }
+            // Key mismatch = possible man-in-the-middle: refuse.
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::known_hosts_path;
+
+    const KEY_A: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBeho8NEkcXMBIheNQQw6yZW/qHNoeJ+d8hX1rrm06Vy";
+    const KEY_B: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOAZNpCgUudICzXK/APRY9kzso+MqxuZGXhVo0VbDBZi";
+
+    #[test]
+    fn known_hosts_file_resolves() {
+        // The handler silently accepts when it cannot resolve the file;
+        // on this machine it must exist so pinning is actually active.
+        assert!(known_hosts_path().is_some());
+    }
+
+    #[test]
+    fn tofu_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let pk_a = russh::keys::ssh_key::PublicKey::from_openssh(KEY_A).unwrap();
+        let pk_b = russh::keys::ssh_key::PublicKey::from_openssh(KEY_B).unwrap();
+        // First contact: not yet known.
+        assert!(!russh::keys::check_known_hosts_path("mff.test", 22, &pk_a, &path).unwrap());
+        // Learning the key makes the next contact trusted.
+        russh::keys::known_hosts::learn_known_hosts_path("mff.test", 22, &pk_a, &path).unwrap();
+        assert!(russh::keys::check_known_hosts_path("mff.test", 22, &pk_a, &path).unwrap());
+        // A different key under the same name = possible MITM → error.
+        assert!(russh::keys::check_known_hosts_path("mff.test", 22, &pk_b, &path).is_err());
+        // Other hosts and ports are unaffected.
+        assert!(!russh::keys::check_known_hosts_path("other.test", 22, &pk_a, &path).unwrap());
+        assert!(!russh::keys::check_known_hosts_path("mff.test", 2222, &pk_a, &path).unwrap());
     }
 }
