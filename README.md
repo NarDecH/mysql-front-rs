@@ -16,15 +16,16 @@
 
 | ฟีเจอร์ | รายละเอียด |
 |---|---|
-| จัดการ connections | เพิ่ม/แก้ไข/ทดสอบ/ลบ connection, เก็บในไฟล์ JSON, รองรับ SSL/TLS 4 โหมด |
-| Object browser | แสดง databases, tables, views, routines, triggers, events พร้อมช่องกรอง |
-| Data browser | ตารางข้อมูลแบบ paginate (เลือกขนาดหน้าได้), sort ด้วยคลิกหัวคอลัมน์, กรองด้วย WHERE, เลือก cell + copy (Ctrl+C) |
-| Structure viewer | คอลัมน์, indexes, foreign keys และ `SHOW CREATE TABLE` พร้อมปุ่ม copy / เปิดใน query editor |
-| Query editor | หลายแท็บ, รันหลาย statement ต่อครั้ง (แยกสคริปต์ให้อัตโนมัติ, รองรับ `DELIMITER`), แสดงหลาย result set, แสดง rows affected / error, จับเวลา |
-| Export | CSV, JSON, SQL (INSERT + CREATE TABLE), HTML, XML จากทั้งตารางและผล query |
-| Import | CSV (เลือก delimiter/header), JSON, ไฟล์สคริปต์ .sql |
-| Server info | `SHOW VARIABLES` พร้อมช่องกรอง |
-| ภาษาไทย | โหลดฟอนต์ไทยของระบบ (Leelawadee UI/Nirmala UI) อัตโนมัติ |
+| จัดการ connections | เพิ่ม/แก้ไข/ทดสอบ/ลบ connection, เก็บในไฟล์ JSON, SSL/TLS 4 โหมด, **SSH tunnel** (`ssh -L` semantics), เก็บรหัสผ่าน (และรหัสผ่าน SSH) ใน **OS keychain** ได้, host key แบบ TOFU |
+| Object browser | แสดง databases, tables, views, routines, triggers, events พร้อมช่องกรอง, แท็บต่อ connection |
+| Data browser | paginate + sort + กรองด้วย WHERE, แก้ไขข้อมูลใน grid (แก้ cell, เพิ่ม/ลบ row, Set NULL), คลิกขวาที่ cell เพื่อ View/Copy/Set NULL/ลบ row และ **ไล่ตาม FK** ("Go to …"), **เลือกหลาย cell (Shift+คลิก) แล้วคัดลอกเป็น TSV พร้อมหัวคอลัมน์**, copy row เป็น TSV/INSERT |
+| Table designer | เพิ่ม/แก้/ลบ/สลับคอลัมน์, แก้ **indexes (INDEX/UNIQUE/FULLTEXT/SPATIAL)** และ **foreign keys (ON DELETE/ON UPDATE)** พร้อม SQL preview แบบสด ๆ และยืนยันก่อน DROP |
+| Schema diff | เทียบโครงสร้างตาราง 2 ตัว (ต่าง connection กันได้) สร้าง ALTER ให้ apply กับฝั่งปลายทาง |
+| Query editor | หลายแท็บ, รันหลาย statement, หลาย result set, **รันเฉพาะข้อความที่เลือก**, **Find/Replace (Ctrl+F)**, **autocomplete ที่ caret + Ctrl+Space**, Format, **EXPLAIN ทีละ statement**, ประวัติ query |
+| Global search | **ค้นหา table/view/column ทุกฐานข้อมูล (Ctrl+Shift+F)** คลิกผลลัพธ์เพื่อเปิดดูทันที |
+| Export / Import | Export CSV, JSON, SQL (INSERT + CREATE TABLE), HTML, XML; Import CSV/JSON/SQL เข้าตาราง; Backup/Restore ทั้ง database |
+| Server admin | **Dashboard สถิติเซิร์ฟเวอร์** (version, connections, queries, uptime), process list + Kill, **จัดการ user** (สร้าง/ลบ) และ **แก้สิทธิ์ด้วย GRANT/REVOKE**, แก้ definition ของ view/routine/trigger/event |
+| ภาพรวมอื่น ๆ | กราฟจากผล query (egui_plot), เทียบข้อมูล 2 ตาราง, โอนย้ายข้อมูลระหว่างเซิร์ฟเวอร์, ภาษาอังกฤษ/ไทยสลับได้ |
 
 ### แอป CLI (`mff-cli.exe`)
 
@@ -42,7 +43,7 @@ mff-cli import     --connection NAME --database DB --table T --FILE data.csv
 
 ทุกอย่างที่ GUI/CLI ใช้ อยู่ใน crate เดียวที่ reuse ได้ — โมเดล schema, session,
 ตัวสร้าง SQL (quoting, DDL, batched INSERT), ตัวแยกสคริปต์ SQL, import/export
-พร้อม unit tests 28 ข้อ
+พร้อม unit tests 85 ข้อ
 
 ---
 
@@ -75,8 +76,8 @@ cargo test --workspace
 `%APPDATA%\mysql-front\connections.json` (Windows) หรือ
 `~/.config/mysql-front/connections.json` (Linux/macOS)
 
-> ⚠️ เหมือนเวอร์ชันต้นฉบับ — **รหัสผ่านถูกเก็บเป็นข้อความล้วน** ในไฟล์นี้
-> โปรดรักษาสิทธิ์การเข้าถึงไฟล์ของผู้ใช้ให้ปลอดภัย
+> รหัสผ่านถูกเก็บเป็นข้อความล้วนในไฟล์นี้ เว้นแต่จะติ๊ก **"store in OS keychain"**
+> ในหน้าจอ connection — รหัสผ่านจะถูกเก็บใน Windows Credential Manager แทน (รองรับรหัสผ่าน SSH ด้วย)
 
 ---
 
@@ -112,12 +113,9 @@ mysql-front-rs/
 
 ## Roadmap
 
-* แก้ไขข้อมูลใน grid (UPDATE/INSERT/DELETE ราย cell แบบเดิม)
-* Table designer แบบแก้ไขได้ / จัดการ users และสิทธิ์
-* โอนย้ายข้อมูลระหว่างเซิร์ฟเวอร์ (data transfer) และ backup/restore
-* SSH tunnel และ HTTP tunnel (ในต้นฉบับมี HTTPTunnel.pas)
-* หลายภาษา (ไฟล์ .ini 28 ภาษาของต้นฉบับเป็นแนวทาง)
-* เก็บรหัสผ่านด้วย OS keychain
+* ER diagram, import/export Excel (ในต้นฉบับมี)
+* HTTP tunnel (ในต้นฉบับมี HTTPTunnel.pas)
+* หลายภาษาเพิ่มเติม (ไฟล์ .ini 28 ภาษาของต้นฉบับเป็นแนวทาง)
 
 ## License
 

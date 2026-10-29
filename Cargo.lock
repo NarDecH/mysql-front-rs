@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "mff-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "mff-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "csv",
  "dirs",
@@ -2806,7 +2806,7 @@ dependencies = [
 
 [[package]]
 name = "mff-gui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dirs",
  "eframe",
